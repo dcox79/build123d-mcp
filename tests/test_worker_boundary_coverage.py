@@ -280,6 +280,14 @@ def _export_file(ws, tmp_path):
     assert out.exists() and out.stat().st_size > 0
 
 
+def _bank_candidate(ws, tmp_path):
+    out = tmp_path / "banked.step"
+    result = json.loads(ws.bank_candidate(str(out), "a", "banked-floor"))
+    assert result["banked"] is True
+    assert result["snapshot_saved"] is True
+    assert out.exists() and out.stat().st_size > 0
+
+
 def _render_view(ws, tmp_path):
     out = tmp_path / "a.png"
     ws.render_view(objects="a", save_to=str(out))
@@ -325,6 +333,7 @@ SESSION_STATEFUL_TOOLS = {
     "last_error": _last_error,
     "inspect_drawing": _inspect_drawing,
     "export_file": _export_file,
+    "bank_candidate": _bank_candidate,
     "render_view": _render_view,
     "pull_viewer_deltas": _pull_viewer_deltas,
 }

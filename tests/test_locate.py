@@ -21,6 +21,40 @@ def _payload(out: str) -> dict:
     return json.loads(out.split("\n", 1)[1])
 
 
+def test_domain_overrun_reports_only_outside_trim_distance():
+    from build123d_mcp._locate_subprocess import _domain_overrun
+
+    assert _domain_overrun((0.0, 1.0, 0.0, 1.0), (0.1, 0.9, -0.0004, 1.0)) == {
+        "v_below": pytest.approx(0.0004)
+    }
+    assert _domain_overrun((0.0, 1.0, 0.0, 1.0), (0.1, 0.9, 0.1, 0.9)) == {}
+
+
+def test_near_tangent_circle_pairs_reports_generic_residual():
+    from build123d_mcp._locate_subprocess import _near_tangent_circle_pairs
+
+    circles = [
+        {"edge_index": 1, "radius": 3.0, "center": (0.0, 0.0, 0.0), "axis": (0, 0, 1)},
+        {
+            "edge_index": 2,
+            "radius": 100.0,
+            "center": (102.99999, 0.0, 0.0),
+            "axis": (0, 0, 1),
+        },
+    ]
+
+    pairs = _near_tangent_circle_pairs(circles)
+
+    assert pairs == [
+        {
+            "edge_indices": [1, 2],
+            "mode": "external",
+            "center_distance_mm": pytest.approx(102.99999),
+            "tangency_residual_mm": pytest.approx(0.00001),
+        }
+    ]
+
+
 def test_locate_valid_solid_has_no_defects(session):
     execute_code(session, "show(Box(10, 10, 10), 'part')")
     out = locate_gate_defects(session, "part")

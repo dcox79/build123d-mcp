@@ -74,7 +74,8 @@ _MALFORMED_FACE = Recipe(
         "The defect is a discrete face or thin strip rather than a global self-intersection.",
     ],
     approach=[
-        "Use one BRepCheck_Analyzer over the whole solid and match suspect face centers to locate_gate_defects().",
+        "Use locate_gate_defects() geometry_diagnostics before writing exploratory face-walk code.",
+        "If it reports near_tangent_circle_pairs, inspect only those edges and replace a tiny offending arc with its chord only when the measured sagitta is below the repair tolerance.",
         "Try ShapeFix_Shape only as a candidate, then verify volume/bbox and export-gate result.",
         "If ShapeFix does not clear the defect, remove only the bad face and sew the surrounding shell across a small tolerance sweep.",
         "If drop-and-sew becomes BRep-valid but mesh-fragile, switch to the mesh-fragile-face recipe for the remaining defect.",
@@ -104,13 +105,14 @@ _MESH_FRAGILE_FACE = Recipe(
         "locate_gate_defects identifies a tiny BSpline/sliver face or local mesh cluster.",
     ],
     approach=[
-        "Locate faces nearest the reported mesh defect coordinates and rank them by area and distance.",
+        "Use the face_index and geometry_diagnostics returned by locate_gate_defects(); do not rediscover its surface, UV, edge, and proximity evidence manually.",
+        "If trim_outside_surface_domain is present, rebuild the face on a copied or extended support surface whose finite UV domain contains the existing trim while preserving its boundary edges.",
         "Prefer rebuilding the smallest face from its existing boundary with BRepFill_Filling, then re-sew tightly.",
         "If the boundary contains a near-zero edge, replace the face with simpler planar triangles only if sewing stays BRep-valid.",
         "For self-touch coordinates, a tiny explicit relief cut is acceptable only when it is far from requested design features and fully documented.",
     ],
     code_patterns=[
-        "for i, f in enumerate(shape.faces()): collect area, center, bbox, geom_type near defect_point",
+        "geometry_diagnostics.trim_outside_surface_domain -> extend/copy the support surface past the reported UV overrun, then remake the same trimmed face",
         "BRepFill_Filling() over the face boundary, followed by BRepBuilderAPI_Sewing(0.001..0.05)",
         "For tiny self-touch: subtract a sub-millimetre Box/Sphere centered on the located defect, then export-gate.",
     ],

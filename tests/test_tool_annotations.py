@@ -67,7 +67,7 @@ def test_mutating_tools_are_not_read_only():
 def test_idempotent_mutations_are_flagged():
     a = _annotations()
     # resolve(label=) writes session.geometry_refs — mutating, but idempotent (overwrite).
-    for n in ("export", "save_snapshot", "restore_snapshot", "resolve"):
+    for n in ("export", "bank_candidate", "save_snapshot", "restore_snapshot", "resolve"):
         assert a[n].read_only_hint is False and a[n].idempotent_hint is True, n
 
 

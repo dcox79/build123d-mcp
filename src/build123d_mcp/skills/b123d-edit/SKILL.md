@@ -19,17 +19,17 @@ Before editing, capture what exists.
 4. Capture numeric evidence:
 
    ```python
-   save_snapshot("before_edit")
    print(measure(part))
    ```
 
 5. Run the MCP `validate()` tool on the registered baseline. For tasks whose
-   deliverable is an exported solid, or where downstream CAD consumers will read
-   a STEP/STL/BREP file, also export the unchanged baseline to a safe throwaway
-   path such as `_baseline_gate.step` and read the export gate result. The
-   throwaway baseline gate must never use the final deliverable path, such as
-   `output.step`. For script-only work, a successful rebuild plus `validate()`
-   is the baseline proof unless the task later requires a file export.
+   deliverable is an exported STEP, use `bank_candidate()` with the real output
+   path and `snapshot_name="valid_baseline"`. It writes privately, runs the
+   written-and-reimported gate, and promotes both the file and snapshot only on
+   PASS. For other CAD formats, export the unchanged baseline to a safe
+   throwaway path and read the export gate result. For script-only work, a
+   successful rebuild plus `validate()` is the baseline proof unless the task
+   later requires a file export.
 6. If the baseline fails the relevant proof (`validate()` for script-only work;
    `validate()` plus the throwaway export gate for exported-solid work), stop
    and switch to `build123d://skill/repair`. Until a repaired baseline passes
@@ -38,8 +38,8 @@ Before editing, capture what exists.
    target feature while the baseline is still invalid. Do not combine a feature
    edit with geometry repair unless the requested edit is the repair.
 7. After the baseline passes the relevant proof, save a snapshot such as
-   `save_snapshot("valid_baseline")`. Only then begin the requested feature or
-   parameter edit.
+   `save_snapshot("valid_baseline")` if `bank_candidate()` did not already do
+   so. Only then begin the requested feature or parameter edit.
 
 For file-based work, keep the source of truth in the Python file. The MCP
 session is the proving ground, not the only copy of the edit.
@@ -152,9 +152,10 @@ show(part, "edited")
 print(measure(part))
 ```
 
-Then run the MCP `validate("edited")` tool. For handoff or final output,
-run `export("edited.step", "step", object_name="edited")` so the written STEP is
-checked too.
+Then run the MCP `validate("edited")` tool. For handoff or final STEP output,
+run `bank_candidate("edited.step", object_name="edited", snapshot_name="final")`
+so the written STEP replaces the safe floor only after its gate passes. Use
+`export()` for diagnostic writes or non-STEP formats.
 
 Then choose the evidence that matches the edit:
 
@@ -199,9 +200,10 @@ add these checks to the loop:
   collision tests near facet noise, compare against an unchanged control and sweep
   a small allowance rather than trusting one absolute overlap volume.
 
-`export()` is the final gate because it checks the written and re-imported STEP.
-A `validate()` pass in memory is useful but not the final acceptance proof.
-If the edited shape fails this gate, call `repair_advice(error_text=..., goal=...)`
+The gate inside `bank_candidate()` is final because it checks the written and
+re-imported STEP without overwriting an existing good output on failure. A
+`validate()` pass in memory is useful but not the final acceptance proof. If the
+edited shape fails this gate, call `repair_advice(error_text=..., goal=...)`
 before improvising OCP surgery. Use the returned recipe as a checklist for a
 visible `execute()` implementation, not as permission to make an opaque B-rep
 mutation.

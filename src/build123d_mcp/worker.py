@@ -870,6 +870,15 @@ class WorkerSession:
     def export_file(self, filename: str, format: str = "step", object_name: str = "") -> str:
         raise NotImplementedError
 
+    @_op(_tool(f"{_T}.export:bank_candidate"), _export_budget)
+    def bank_candidate(
+        self,
+        filename: str,
+        object_name: str = "",
+        snapshot_name: str = "",
+    ) -> str:
+        raise NotImplementedError
+
     # measure/validate/clearance/cross_sections isolate a large shape's native
     # analysis in a bounded subprocess (tools/_bounded.py, #360). That subprocess is
     # bounded by op_budget() == _export_budget, so the parent watchdog must be the

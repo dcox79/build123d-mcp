@@ -25,9 +25,11 @@ snapshots — a feedback loop a one-shot script cannot give.
 
 Quick start: execute("from build123d import *"), build in small steps,
 register parts with show(part, "name"), measure() after every boolean,
-export() when done. For edits to imported B-reps, call recognise_features()
-once for a compact inventory before hand-walking topology, then expand only
-the likely feature families and use their exact face evidence where available.
+bank_candidate() when establishing a safe STEP floor or final output, and
+export() for ordinary diagnostic/interchange writes. For edits to imported
+B-reps, call recognise_features() once for a compact inventory after the
+baseline is gate-clean, before hand-walking topology; then expand only the
+likely feature families and use their exact face evidence where available.
 Read the build123d://quickref resource before writing build code. Step-by-step
 workflows: build123d://skill/modeling (build 3D
 parts, incl. from technical drawings), build123d://skill/edit (modify an
@@ -660,6 +662,12 @@ def inspect_part(
 def export(filename: str, format: str = "step", object_name: str = "") -> str:
     """Export model. format: step, stl, 3mf, dxf, svg, or comma-separated list e.g. 'step,stl' or 'dxf,svg'. 3D shapes (solids) export to step/stl/3mf; 2D shapes (Sketches and dimensioned drawings composed via build123d.drafting) export to dxf/svg. 3mf is a minimal core-spec mesh export (single object, no color/material) intended for slicers (Bambu Studio, PrusaSlicer, Orca) — use step for downstream CAD interop instead. Mixing 2D and 3D formats for the same shape errors with a clear message. object_name: named object from show(), '*' to export all named shapes as a combined assembly (default: current shape). STEP exports carry the session names as labels — single-object exports use the object_name, '*' exports produce a Compound labelled 'assembly' with each child labelled by its show() name. Downstream CAD tools (FreeCAD, Fusion) will see the structured assembly with named bodies. Use dxf for engineering-drawing handoff to other CAD tools; svg for embedding in docs/wikis. The result echoes the exported shape's volume/bbox/face count (or bbox/edge count for 2D) as a final sanity check that the right, non-degenerate object was written."""
     return _resolve_session().export_file(filename, format, object_name)
+
+
+@mcp.tool(annotations=_IDEMPOTENT)
+def bank_candidate(filename: str, object_name: str = "", snapshot_name: str = "") -> str:
+    """Atomically promote a gate-clean STEP as the safe output/checkpoint. Writes the candidate to a private sibling file, runs the authoritative written-and-reimported STEP gate, and replaces filename only on a fully verified PASS; on FAIL or an unchecked mesh gate, the candidate is deleted and any existing output is preserved. If snapshot_name is supplied, the geometry snapshot is saved only after promotion. Returns JSON including banked, preservation/snapshot status, the export report, and the next recommended recognition or repair call. Use this instead of batching export() and save_snapshot() for scored floors and final candidates."""
+    return _resolve_session().bank_candidate(filename, object_name, snapshot_name)
 
 
 @mcp.tool(annotations=_READ_ONLY)

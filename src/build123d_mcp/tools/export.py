@@ -1,6 +1,7 @@
 import contextlib
 import copy
 import errno
+import json
 import os
 import stat
 import struct
@@ -673,6 +674,80 @@ def export_file(session, filename: str, format: str = "step", object_name: str =
     if len(exported) == 1:
         return f"Exported to {exported[0]}{suffix}"
     return "Exported to:\n" + "\n".join(exported) + suffix
+
+
+def bank_candidate(
+    session,
+    filename: str,
+    object_name: str = "",
+    snapshot_name: str = "",
+) -> str:
+    """Gate a STEP candidate before atomically promoting it to ``filename``.
+
+    ``export_file`` deliberately writes even a failing diagnostic artifact.  That
+    is useful while repairing, but unsafe for a scored floor: an agent can batch
+    export and snapshot calls, then overwrite its last known-good file before it
+    has read the gate result.  This operation writes to a private sibling path,
+    runs the normal written-and-reimported export gate, and replaces the requested
+    file only when that gate is fully verified.  A failed or unchecked candidate
+    is deleted and any existing destination is left byte-for-byte untouched.
+    """
+    requested = filename if filename.lower().endswith((".step", ".stp")) else filename + ".step"
+    final_path = safe_output_path(requested)
+    parent = os.path.dirname(final_path) or os.getcwd()
+    os.makedirs(parent, exist_ok=True)
+    suffix = ".stp" if final_path.lower().endswith(".stp") else ".step"
+    fd, candidate_path = tempfile.mkstemp(prefix="bank-candidate-", suffix=suffix, dir=parent)
+    os.close(fd)
+    os.unlink(candidate_path)
+    existed = os.path.exists(final_path)
+
+    try:
+        report = export_file(session, candidate_path, "step", object_name)
+        failed = "VALIDITY GATE FAIL" in report
+        unchecked = "too large to mesh-check" in report or "mesh-level defect" in report
+        if failed or unchecked:
+            payload = {
+                "banked": False,
+                "filename": final_path,
+                "existing_output_preserved": existed,
+                "snapshot_saved": False,
+                "reason": "written STEP failed the validity gate"
+                if failed
+                else "mesh gate was not verified",
+                "next_tool_calls": [
+                    f"locate_gate_defects(object_name={object_name!r})",
+                    "repair_advice(error_text=<the export failure>, goal=<requested edit>, context=<locator diagnosis>)",
+                ],
+                "export_report": report,
+            }
+            return json.dumps(payload, indent=2)
+
+        os.replace(candidate_path, final_path)
+        saved = False
+        if snapshot_name:
+            session.save_snapshot(snapshot_name)
+            saved = True
+        target = object_name or "<current shape>"
+        payload = {
+            "banked": True,
+            "filename": final_path,
+            "replaced_existing_output": existed,
+            "snapshot_saved": saved,
+            "snapshot_name": snapshot_name or None,
+            "next_tool_call": f"recognise_features(object_name={target!r})",
+            "note": (
+                "The written STEP passed the gate and is now the safe floor. For an imported "
+                "B-rep edit, run compact then targeted recognition before manual topology walking."
+            ),
+            "export_report": report,
+        }
+        return json.dumps(payload, indent=2)
+    finally:
+        try:
+            os.unlink(candidate_path)
+        except OSError:
+            pass
 
 
 def _sanity_line(shape) -> str:
