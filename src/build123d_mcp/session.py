@@ -584,8 +584,8 @@ class Session:
 
             Returns dict records: bore location/axis/diameter/depth, cap face
             indices at the opening, split-cap risk flags, and construction
-            advice. Use before extending a square/rounded-square boss with a
-            central bore.
+            advice. Use before lengthening any boss that carries a bore,
+            whatever its outer profile.
             """
             from build123d_mcp.tools.find_features import _find_bored_boss_candidates
 

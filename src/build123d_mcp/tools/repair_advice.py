@@ -215,7 +215,7 @@ _SELF_TOUCH = Recipe(
 
 _SPLIT_BORED_BOSS = Recipe(
     id="split_bored_boss_extension",
-    title="Extend a split rounded-square boss while preserving its central bore",
+    title="Extend a split-cap boss while preserving its bore",
     applies_when=[
         "The requested edit increases boss length/depth/height and the boss has a through bore.",
         "The target front face is split into several planar faces around the bore or rounded corners.",
