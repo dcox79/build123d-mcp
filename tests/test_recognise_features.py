@@ -100,3 +100,32 @@ def test_reset_expires_handles_and_clears_cache(featured_session):
         featured_session.namespace["recognition_faces"](reference)
     assert featured_session._recognition_runs == {}
     assert featured_session._recognition_targets == {}
+
+
+@pytest.fixture
+def pocketed_session():
+    session = Session()
+    session.execute(
+        """
+from build123d import *
+plate = Box(80, 40, 12)
+for x in (-20, 20):
+    plate -= Pos(x, 0, 6) * Box(14, 20, 5, align=(Align.CENTER, Align.CENTER, Align.MAX))
+show(plate, 'plate')
+"""
+    )
+    return session
+
+
+def test_pockets_are_section_recesses_and_non_target_fields_are_hidden(pocketed_session):
+    recesses = json.loads(recognise_features(pocketed_session, "plate", families="section_recess"))
+    assert recesses["matched"] == 2
+    assert {f["record_type"] for f in recesses["features"]} == {"SectionRecess"}
+    faces = pocketed_session.namespace["recognition_faces"](recesses["features"][0]["ref"])
+    assert faces
+
+    unknown = json.loads(recognise_features(pocketed_session, "plate", families="pockets"))
+    assert "Unknown targetable families: pockets" in unknown["error"]
+    listed = unknown["targetable_families"]
+    assert "section_recesses" in listed
+    assert not [name for name in listed if name.endswith(("_patterns", "_refusals"))]

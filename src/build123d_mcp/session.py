@@ -75,7 +75,7 @@ class Session:
         self.drawing_annotations: dict[str, Any] = {}
         self.drawing_page: dict[str, Any] | None = None
         self.geometry_refs: dict[str, Any] = {}
-        # Run-local b123d-recognisers evidence. The public handles resolve through
+        # Run-local quiddity evidence. The public handles resolve through
         # recognition_faces() below and are rejected when their source object has
         # been replaced; opaque package references never cross the MCP wire.
         self._recognition_runs: dict[tuple[str, str], dict[str, Any]] = {}
@@ -229,7 +229,7 @@ class Session:
             """Resolve a recognise_features() handle to exact caller-part faces.
 
             References are intentionally valid only while their source session
-            object is unchanged. This mirrors b123d-recognisers' evidence
+            object is unchanged. This mirrors quiddity's evidence
             lifecycle instead of turning transient topology into persistent IDs.
             """
             target = self._recognition_targets.get(reference)

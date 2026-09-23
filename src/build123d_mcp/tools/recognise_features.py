@@ -18,6 +18,8 @@ from build123d_mcp.tools.measure import _resolve_shape
 from build123d_mcp.tools.resolve import _describe
 
 _MAX_FEATURES = 100
+# Result fields that are not published as feature families: aggregates,
+# patterns, and SectionRecess refusals (published under ``section_recesses``).
 _NON_TARGET_RESULT_FIELDS = frozenset(
     {
         "cylinders",
@@ -25,8 +27,9 @@ _NON_TARGET_RESULT_FIELDS = frozenset(
         "hole_patterns",
         "slot_patterns",
         "oriented_slot_patterns",
-        "pocket_patterns",
-        "passages",
+        "section_recess_patterns",
+        "section_recess_refusals",
+        "gusset_rib_patterns",
     }
 )
 
@@ -61,7 +64,12 @@ def _normalise_families(requested: str, known: set[str]) -> tuple[list[str], lis
         name = raw.strip().lower().replace("-", "_").replace(" ", "_")
         if not name:
             continue
-        candidates = (name, f"{name}s", f"{name[:-1]}ies" if name.endswith("y") else name)
+        candidates = (
+            name,
+            f"{name}s",
+            f"{name}es",
+            f"{name[:-1]}ies" if name.endswith("y") else name,
+        )
         family = next((candidate for candidate in candidates if candidate in known), None)
         if family is None:
             unknown.append(name)
@@ -131,8 +139,8 @@ def _discard_run(session: Any, run: dict[str, Any]) -> None:
 
 
 def _build_run(session: Any, source: Any, source_name: str, coordinate_frame: str):
-    from b123d_recognisers import RefusedFramedEvidence, build_framed_recognition_evidence
-    from b123d_recognisers.evidence import build_recognition_evidence
+    from quiddity import RefusedFramedEvidence, build_framed_recognition_evidence
+    from quiddity.evidence import build_recognition_evidence
 
     evidence: Any
     if coordinate_frame == "caller":
