@@ -13,7 +13,7 @@ def test_repair_advice_matches_split_bored_boss_extension():
                 "Validity gate: FAIL - B-rep is not well-formed (BRepCheck failed); "
                 "4 open edge(s) - not watertight; exported output.step still invalid"
             ),
-            goal="Increase the length of the square boss with rounded corners and a central bore by 10mm.",
+            goal="Extend the hexagonal boss with a through bore by 12 mm.",
             context="The face extrusion created a separate new bore segment.",
         )
     )

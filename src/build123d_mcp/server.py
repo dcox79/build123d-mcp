@@ -984,7 +984,7 @@ def find_bosses(object_name: str = "") -> str:
 
 @mcp.tool(annotations=_READ_ONLY)
 def find_bored_bosses(object_name: str = "") -> str:
-    """Find candidate bored bosses and report target-selection/edit evidence: bore opening location, axis into the part, outward axis, bore diameter/depth, planar cap faces at the opening, whether the cap is split across multiple faces, and construction advice. Use this before extending a square/rounded-square boss with a central bore; it is read-only and diagnostic, not proof of the requested target."""
+    """Find candidate bored bosses and report target-selection/edit evidence: bore opening location, axis into the part, outward axis, bore diameter/depth, planar cap faces at the opening, whether the cap is split across multiple faces, and construction advice. Use this before lengthening any boss that carries a bore, whatever its outer profile; it is read-only and diagnostic, not proof of the requested target."""
     return _resolve_session().find_bored_bosses(object_name)
 
 

@@ -60,8 +60,8 @@ Classify the edit before changing code:
 - **Validity edit**: change construction so the output remains manifold.
   Use `validate()`, `locate_gate_defects()`, `find_bored_bosses()`,
   `repair_advice()`, and the repair skill only for diagnostics and patterns.
-  `find_bored_bosses()` is useful before extending a square/rounded-square
-  boss with a central bore: it reports candidate bore axes, cap faces, split
+  `find_bored_bosses()` is useful before lengthening any boss that carries
+  a bore: it reports candidate bore axes, cap faces, split
   caps, and construction warnings. `repair_advice()` is especially useful when
   the intended edit is generic but topology-sensitive, such as extending a
   bored boss, moving an annular shoulder, or fixing an export-roundtrip sliver
@@ -277,7 +277,7 @@ solids, ask the MCP for a recipe before trying variants:
 ```text
 repair_advice(
   error_text="<validate/export failure text>",
-  goal="extend the square boss with rounded corners and central bore by 10mm",
+  goal="lengthen the flanged boss and its through bore by 8mm",
   context="<locate_gate_defects or compare(a='before', b='candidate', kind='shape') notes>"
 )
 ```
