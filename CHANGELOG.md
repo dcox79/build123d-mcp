@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.3.85
+
+### Changed
+
+- **Feature recognition now uses [quiddity](https://github.com/pzfreo/quiddity)
+  0.3.4**, the renamed successor of the deprecated `b123d-recognisers` (0.4.14
+  was locked before). `recognise_features()` family names change with it:
+  - `pockets`, `channels`, `prismatic_pockets`, `rectangular_blind_slots`,
+    `round_bottom_blind_slots` and `section_passages` are gone — all are now
+    reported as **`section_recesses`**. A `SectionRecessRefusal` record in that
+    family means a recess was detected but its geometry was not proved.
+  - New targetable family: `gusset_ribs`.
+  - Recogniser output changes inherited from quiddity: turned steps coalesce,
+    coaxial hole stacks split into separate occurrences, bosses exactly matched
+    by a turned step are suppressed, and some records gain fields (e.g.
+    `Slot.end_radius`/`corner_radius`, `Fillet.side`).
+- Pattern and refusal result fields (`*_patterns`, `section_recess_refusals`)
+  are no longer offered as targetable families; requesting one used to return
+  an empty match instead of an error. Singular `section_recess` is accepted.
+
 ## v0.3.83
 
 ### Changed

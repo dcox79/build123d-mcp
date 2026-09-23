@@ -1002,7 +1002,7 @@ def recognise_features(
     include_faces: bool = False,
     max_features: int = 50,
 ) -> str:
-    """Run the shared b123d-recognisers inventory once and return exact, run-local edit evidence. With families='' the response is a compact inventory and targetable-family count; pass comma-separated families such as 'holes,bosses,blends' for structured records and @feature handles. Returned handles are usable inside execute() as recognition_faces(handle), or recognition_faces(handle, role='defining'), and fail if their source geometry has been replaced. coordinate_frame='caller' (default) preserves the imported model coordinates used by edit instructions; 'part' uses a rigid-equivariant part-relative frame and returns that frame. include_faces adds exact caller-face indices and geometry descriptors. max_features limits expanded records to 1..100; counts remain exact."""
+    """Run the shared quiddity inventory once and return exact, run-local edit evidence. With families='' the response is a compact inventory and targetable-family count; pass comma-separated families such as 'holes,bosses,blends' for structured records and @feature handles. Returned handles are usable inside execute() as recognition_faces(handle), or recognition_faces(handle, role='defining'), and fail if their source geometry has been replaced. coordinate_frame='caller' (default) preserves the imported model coordinates used by edit instructions; 'part' uses a rigid-equivariant part-relative frame and returns that frame. include_faces adds exact caller-face indices and geometry descriptors. max_features limits expanded records to 1..100; counts remain exact."""
     return _resolve_session().recognise_features(
         object_name,
         families=families,
