@@ -105,7 +105,7 @@ evidence. The default caller-coordinate records agree with the imported model;
 use `coordinate_frame="part"` only when a part-relative frame is useful. Handles
 are run-local and deliberately fail after their named source geometry is
 replaced, so recognise again after an edit. Empty families are explicit misses,
-not permission to substitute a nearby feature. Pockets, channels, through-slots and
+not permission to substitute a nearby feature. Pockets, channels, blind slots and
 passages are all reported as `section_recesses`; a record whose `record_type`
 is `SectionRecessRefusal` means a recess was detected but its geometry was not
 proved, so do not reconstruct from it.
