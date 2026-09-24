@@ -221,6 +221,21 @@ def recognise_features(
         try:
             run = _build_run(session, source, source_name, coordinate_frame)
         except (RuntimeError, ValueError) as exc:
+            if not source.is_valid:
+                # The recogniser only makes claims about a proven valid solid, so an
+                # invalid import fails deep inside one family with an opaque message.
+                return json.dumps(
+                    {
+                        "error": (
+                            "Recognition needs a valid solid, and this shape fails the "
+                            "B-rep validity check. Repair it first (read "
+                            "build123d://skill/repair; validate() must pass), then call "
+                            "recognise_features() again on the repaired shape."
+                        ),
+                        "recogniser_detail": str(exc),
+                    },
+                    indent=2,
+                )
             return json.dumps({"error": f"Recognition failed: {exc}"}, indent=2)
         session._recognition_runs[cache_key] = run
 
