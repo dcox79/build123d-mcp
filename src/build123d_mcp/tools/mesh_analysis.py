@@ -67,8 +67,8 @@ def _chain(segs, weld: float):
 
     # Nearby endpoints can fall on opposite sides of a rounding boundary.
     # Search neighbouring cells and assign one vertex id to points within weld.
-    buckets: dict = {}
-    points = []
+    buckets: dict[tuple[int, int, int], list[int]] = {}
+    points: list[tuple[float, float, float]] = []
 
     def vertex(p):
         cell = tuple(math.floor(c / weld) for c in p)
@@ -84,7 +84,7 @@ def _chain(segs, weld: float):
         buckets.setdefault(cell, []).append(index)
         return index
 
-    edges = []
+    edges: list[tuple[int, int]] = []
     adj: dict[int, list[int]] = {}
     for a, b in segs:
         start, end = vertex(a), vertex(b)
@@ -116,9 +116,10 @@ def _chain(segs, weld: float):
             path.append(nxt)
             path_vertices.add(nxt)
             remaining = (candidate for candidate in adj[nxt] if candidate not in seen_edges)
-            edge = next(remaining, None)
-            if edge is None:
+            next_edge = next(remaining, None)
+            if next_edge is None:
                 break
+            edge = next_edge
             cur = nxt
     return loops
 
@@ -163,7 +164,9 @@ def _enclosed_flags(loops, axis: int):
                 _point_in_polygon(probe, other)
                 for j, other in enumerate(polys)
                 if j != i and len(other) >= 3
-            ) % 2 == 1
+            )
+            % 2
+            == 1
         )
     return flags
 
@@ -313,8 +316,16 @@ def mesh_holes(
                 # can fall between two sample planes. Walk out from a real hit
                 # with a fine step to find where the feature actually stops.
                 start, end = _refine_span(
-                    tris, ax, key, run, step, lo[ax], hi[ax], weld,
-                    min_diameter, max_diameter,
+                    tris,
+                    ax,
+                    key,
+                    run,
+                    step,
+                    lo[ax],
+                    hi[ax],
+                    weld,
+                    min_diameter,
+                    max_diameter,
                 )
                 spans.append((start, end))
 
@@ -340,8 +351,7 @@ def mesh_holes(
                         "span": [round(start, 3), round(end, 3)],
                         "depth": round(end - start, 3),
                         "through": (
-                            start - wall_start <= edge_error
-                            and wall_end - end <= edge_error
+                            start - wall_start <= edge_error and wall_end - end <= edge_error
                         ),
                     }
                 )
@@ -407,9 +417,14 @@ def _local_wall_span(tris, axis, cu, cv, diameter, start, end, fallback):
     radius = diameter * 0.65
     diagonal = radius / math.sqrt(2)
     offsets = [
-        (radius, 0), (-radius, 0), (0, radius), (0, -radius),
-        (diagonal, diagonal), (diagonal, -diagonal),
-        (-diagonal, diagonal), (-diagonal, -diagonal),
+        (radius, 0),
+        (-radius, 0),
+        (0, radius),
+        (0, -radius),
+        (diagonal, diagonal),
+        (diagonal, -diagonal),
+        (-diagonal, diagonal),
+        (-diagonal, -diagonal),
     ]
     spans = []
     for du, dv in offsets:

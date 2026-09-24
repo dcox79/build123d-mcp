@@ -74,10 +74,7 @@ def test_opposed_blind_pockets_are_not_merged_into_one_through_hole(session):
     whole 40 mm width — reporting a through hole through 32 mm of solid bar.
     """
     session.execute(_BAR)
-    at_x0 = [
-        h for h in _holes(session, "bar")
-        if h["axis"] == "Y" and abs(h["location"][0]) < 1.0
-    ]
+    at_x0 = [h for h in _holes(session, "bar") if h["axis"] == "Y" and abs(h["location"][0]) < 1.0]
     assert len(at_x0) == 2, f"expected two separate pockets, got {at_x0}"
     for h in at_x0:
         assert not h["through"]
@@ -147,8 +144,7 @@ def test_bad_axis_is_rejected(session):
 
 def test_solid_island_inside_cavity_is_not_a_second_hole(session):
     session.execute(
-        "part = Box(60, 60, 40) - Cylinder(20, 40) + Cylinder(3, 40)\n"
-        "show(part, 'island')"
+        "part = Box(60, 60, 40) - Cylinder(20, 40) + Cylinder(3, 40)\nshow(part, 'island')"
     )
     section = json.loads(mesh_section(session, "island", position=0))
     assert section["loop_count"] == 3
