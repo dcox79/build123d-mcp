@@ -16,7 +16,7 @@ import json
 import pytest
 
 from build123d_mcp.session import Session
-from build123d_mcp.tools.mesh_analysis import mesh_holes, mesh_section
+from build123d_mcp.tools.mesh_analysis import _chain, mesh_holes, mesh_section
 
 
 @pytest.fixture
@@ -143,3 +143,69 @@ def test_bad_axis_is_rejected(session):
     session.execute(_BAR)
     with pytest.raises(ValueError, match="axis must be X, Y or Z"):
         mesh_section(session, "bar", axis="Q")
+
+
+def test_solid_island_inside_cavity_is_not_a_second_hole(session):
+    session.execute(
+        "part = Box(60, 60, 40) - Cylinder(20, 40) + Cylinder(3, 40)\n"
+        "show(part, 'island')"
+    )
+    section = json.loads(mesh_section(session, "island", position=0))
+    assert section["loop_count"] == 3
+    assert section["enclosed_passages"] == 1
+    holes = _holes(session, "island")
+    assert not any(abs(h["diameter"] - 6) < 0.5 for h in holes), holes
+
+
+def test_opposed_pockets_in_thin_plate_stay_separate(session):
+    session.execute(
+        "plate = Box(40, 40, 10)\n"
+        "plate -= Pos(0, 0, 3.5) * Cylinder(3, 3)\n"
+        "plate -= Pos(0, 0, -3.5) * Cylinder(3, 3)\n"
+        "show(plate, 'plate')"
+    )
+    pockets = [h for h in _holes(session, "plate") if h["axis"] == "Z"]
+    assert len(pockets) == 2, pockets
+    assert all(not h["through"] and h["depth"] < 4 for h in pockets)
+
+
+def test_through_hole_in_short_flange_uses_local_wall(session):
+    session.execute(
+        "part = Box(100, 40, 10) + Pos(55, 0, 0) * Box(10, 40, 30)\n"
+        "part -= Pos(55, 0, 10) * Rot(0, 90, 0) * Cylinder(3, 12)\n"
+        "show(part, 'flange')"
+    )
+    holes = [h for h in _holes(session, "flange") if h["axis"] == "X"]
+    assert len(holes) == 1, holes
+    assert holes[0]["through"]
+    assert 9 < holes[0]["depth"] < 11
+
+
+def test_chain_preserves_vertices_and_welds_across_grid_boundaries():
+    triangle = [
+        ((0, 0, 0), (1, 0, 0)),
+        ((1, 0, 0), (0, 1, 0)),
+        ((0, 1, 0), (0, 0, 0)),
+    ]
+    assert [len(loop) for loop in _chain(triangle, 0.001)] == [3]
+
+    square = [
+        ((0.00049, 0, 0), (1, 0, 0)),
+        ((1, 0, 0), (1, 1, 0)),
+        ((1, 1, 0), (0, 1, 0)),
+        ((0, 1, 0), (0.00051, 0, 0)),
+    ]
+    assert [len(loop) for loop in _chain(square, 0.001)] == [4]
+
+
+@pytest.mark.parametrize("kwargs", [{"slices": 0}, {"slices": -5}, {"weld": 0}])
+def test_invalid_mesh_hole_sampling_is_rejected(session, kwargs):
+    session.execute(_BAR)
+    with pytest.raises(ValueError):
+        mesh_holes(session, "bar", **kwargs)
+
+
+def test_invalid_mesh_section_weld_is_rejected(session):
+    session.execute(_BAR)
+    with pytest.raises(ValueError, match="weld"):
+        mesh_section(session, "bar", weld=0)

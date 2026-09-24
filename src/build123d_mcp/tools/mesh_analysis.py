@@ -17,8 +17,9 @@ internal duct is enclosed rather than an open groove.
 """
 
 import json
+import math
 
-_MAX_TRIANGLES = 400_000
+_MAX_TRIANGLES = 50_000
 
 _AXES = {"X": 0, "Y": 1, "Z": 2}
 
@@ -31,6 +32,8 @@ def _axis_index(axis: str) -> int:
 
 
 def _triangles(shape, tolerance: float):
+    if not math.isfinite(tolerance) or tolerance <= 0:
+        raise ValueError("tolerance must be a positive finite number")
     verts, tris = shape.tessellate(tolerance)
     if len(tris) > _MAX_TRIANGLES:
         raise ValueError(
@@ -59,32 +62,64 @@ def _slice(tris, axis: int, value: float):
 
 def _chain(segs, weld: float):
     """Join segments end-to-end into closed loops."""
+    if not math.isfinite(weld) or weld <= 0:
+        raise ValueError("weld must be a positive finite number")
 
-    def key(p):
-        return (round(p[0] / weld), round(p[1] / weld), round(p[2] / weld))
+    # Nearby endpoints can fall on opposite sides of a rounding boundary.
+    # Search neighbouring cells and assign one vertex id to points within weld.
+    buckets: dict = {}
+    points = []
 
-    adj: dict = {}
+    def vertex(p):
+        cell = tuple(math.floor(c / weld) for c in p)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    neighbour = (cell[0] + dx, cell[1] + dy, cell[2] + dz)
+                    for index in buckets.get(neighbour, ()):
+                        if sum((a - b) ** 2 for a, b in zip(p, points[index])) <= weld**2:
+                            return index
+        index = len(points)
+        points.append(p)
+        buckets.setdefault(cell, []).append(index)
+        return index
+
+    edges = []
+    adj: dict[int, list[int]] = {}
     for a, b in segs:
-        adj.setdefault(key(a), []).append((key(b), b))
-        adj.setdefault(key(b), []).append((key(a), a))
-
-    seen: set = set()
-    loops = []
-    for start in list(adj):
-        if start in seen:
+        start, end = vertex(a), vertex(b)
+        if start == end:
             continue
-        loop, cur, prev = [], start, None
-        while cur is not None and cur not in seen:
-            seen.add(cur)
-            nxt = None
-            for k, p in adj.get(cur, []):
-                if k != prev and k not in seen:
-                    loop.append(p)
-                    nxt = k
-                    break
-            prev, cur = cur, nxt
-        if len(loop) >= 3:
-            loops.append(loop)
+        edge = len(edges)
+        edges.append((start, end))
+        adj.setdefault(start, []).append(edge)
+        adj.setdefault(end, []).append(edge)
+
+    seen_edges: set[int] = set()
+    loops = []
+    for first_edge, (start, _) in enumerate(edges):
+        if first_edge in seen_edges:
+            continue
+        path = [start]
+        path_vertices = {start}
+        cur, edge = start, first_edge
+        while True:
+            seen_edges.add(edge)
+            a, b = edges[edge]
+            nxt = b if cur == a else a
+            if nxt == start:
+                if len(path) >= 3:
+                    loops.append([points[index] for index in path])
+                break
+            if nxt in path_vertices:
+                break
+            path.append(nxt)
+            path_vertices.add(nxt)
+            remaining = (candidate for candidate in adj[nxt] if candidate not in seen_edges)
+            edge = next(remaining, None)
+            if edge is None:
+                break
+            cur = nxt
     return loops
 
 
@@ -124,11 +159,11 @@ def _enclosed_flags(loops, axis: int):
             continue
         probe = poly[0]
         flags.append(
-            any(
+            sum(
                 _point_in_polygon(probe, other)
                 for j, other in enumerate(polys)
                 if j != i and len(other) >= 3
-            )
+            ) % 2 == 1
         )
     return flags
 
@@ -168,7 +203,7 @@ def mesh_section(
         each loop carries points/center/size/min/max in the two axes that are
         not `axis`, plus `enclosed`.
 
-    `enclosed_passages` counts loops that lie INSIDE another loop - a passage
+    `enclosed_passages` counts loops at odd nesting depth - passages
     through the material at this height. Containment is tested, not inferred
     from the loop count: a groove cut clean across a bar splits the section
     into two disjoint outlines, and counting `loop_count - 1` would call that
@@ -239,6 +274,15 @@ def mesh_holes(
     """
     from build123d_mcp.tools.measure import _resolve_shape
 
+    if slices < 1:
+        raise ValueError("slices must be at least 1")
+    if not math.isfinite(weld) or weld <= 0:
+        raise ValueError("weld must be a positive finite number")
+    if not 0 < min_diameter <= max_diameter:
+        raise ValueError("diameters must be positive and min_diameter <= max_diameter")
+    if min_depth < 0:
+        raise ValueError("min_depth must be nonnegative")
+
     shape = _resolve_shape(session, object_name)
     tris = _triangles(shape, tolerance)
     bb = shape.bounding_box()
@@ -274,14 +318,17 @@ def mesh_holes(
                 )
                 spans.append((start, end))
 
-            # A bore can drop out of detection on individual slices where the
-            # tessellation happens to chain badly, fragmenting one through hole
-            # into several runs. A gap narrower than the bore is a dropout, not
-            # solid material: merge. Pockets bored into opposite faces stay
-            # separate because the land between them is far wider than they are.
-            for start, end in _merge_spans(spans, dia):
+            # A missed slice can fragment a bore. Merge short gaps only when
+            # the bore centreline has no surface crossing the gap: a pocket
+            # floor is evidence of solid material, however thin the land is.
+            barriers = _axis_intersections(tris, ax, cu, cv)
+            for start, end in _merge_spans(spans, step, barriers, weld):
                 if end - start < min_depth:
                     continue  # tessellation sliver, chamfer ring, not a hole
+                wall_start, wall_end = _local_wall_span(
+                    tris, ax, cu, cv, dia, start, end, (lo[ax], hi[ax])
+                )
+                edge_error = min(step * 0.6, (wall_end - wall_start) * 0.03)
                 centre = [0.0, 0.0, 0.0]
                 centre[u], centre[v] = cu, cv
                 centre[ax] = round((start + end) / 2, 3)
@@ -292,7 +339,10 @@ def mesh_holes(
                         "location": [round(c, 3) for c in centre],
                         "span": [round(start, 3), round(end, 3)],
                         "depth": round(end - start, 3),
-                        "through": (end - start) >= extent * 0.98,
+                        "through": (
+                            start - wall_start <= edge_error
+                            and wall_end - end <= edge_error
+                        ),
                     }
                 )
     return json.dumps({"count": len(holes), "holes": holes}, indent=2)
@@ -316,15 +366,60 @@ def _sample_positions(lo: float, hi: float, slices: int):
     return sorted(v for v in values if lo < v < hi)
 
 
-def _merge_spans(spans, diameter):
-    """Join spans separated by less than the bore diameter."""
+def _merge_spans(spans, step, barriers, weld):
+    """Join nearby runs unless a pocket floor crosses the bore centreline."""
     out = []
     for start, end in sorted(spans):
-        if out and start - out[-1][1] < diameter:
+        gap_start = out[-1][1] if out else None
+        no_floor = gap_start is not None and not any(
+            gap_start + weld < p < start - weld for p in barriers
+        )
+        if out and start - gap_start <= step * 1.5 and no_floor:
             out[-1] = (out[-1][0], max(out[-1][1], end))
         else:
             out.append((start, end))
     return out
+
+
+def _axis_intersections(tris, axis, u_value, v_value):
+    """Coordinates where an axis-parallel line meets mesh triangles."""
+    u, v = [k for k in range(3) if k != axis]
+    hits = []
+    for tri in tris:
+        a, b, c = tri
+        bu, bv = b[u] - a[u], b[v] - a[v]
+        cu, cv = c[u] - a[u], c[v] - a[v]
+        du, dv = u_value - a[u], v_value - a[v]
+        det = bu * cv - bv * cu
+        if abs(det) < 1e-12:
+            continue
+        wb = (du * cv - dv * cu) / det
+        wc = (bu * dv - bv * du) / det
+        wa = 1 - wb - wc
+        if min(wa, wb, wc) >= -1e-9:
+            hits.append(wa * a[axis] + wb * b[axis] + wc * c[axis])
+    hits.sort()
+    return [p for i, p in enumerate(hits) if i == 0 or p - hits[i - 1] > 1e-6]
+
+
+def _local_wall_span(tris, axis, cu, cv, diameter, start, end, fallback):
+    """Estimate local wall faces from rays just outside the bore perimeter."""
+    radius = diameter * 0.65
+    diagonal = radius / math.sqrt(2)
+    offsets = [
+        (radius, 0), (-radius, 0), (0, radius), (0, -radius),
+        (diagonal, diagonal), (diagonal, -diagonal),
+        (-diagonal, diagonal), (-diagonal, -diagonal),
+    ]
+    spans = []
+    for du, dv in offsets:
+        hits = _axis_intersections(tris, axis, cu + du, cv + dv)
+        if len(hits) < 2:
+            continue
+        wall_start, wall_end = hits[0], hits[-1]
+        if wall_start <= start + 0.1 and wall_end >= end - 0.1:
+            spans.append((wall_start, wall_end))
+    return min(spans, key=lambda span: span[1] - span[0], default=fallback)
 
 
 def _runs(positions, step):

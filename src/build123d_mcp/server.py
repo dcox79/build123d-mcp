@@ -650,7 +650,7 @@ def mesh_section(
     tolerance: float = 0.1,
     weld: float = 0.001,
 ) -> str:
-    """Loops on one cross-section plane of a MESH, largest first. Returns JSON {axis, position, loop_count, enclosed_passages, loops:[{points, center, size, min, max}]}, all in the two axes that are not `axis`. enclosed_passages counts loops after the largest: a passage through the material at this height. Use it to prove an internal duct is enclosed rather than an open groove - an open groove reads 0 however deep it looks in a render, and a render cannot show the difference at all. Works on imported STL shells, where inner_wires() and the hole recognisers return nothing, and on solids as a second opinion. axis: X, Y or Z (the plane normal). position: absolute world coordinate. tolerance: tessellation tolerance. weld: point-merge distance when chaining segments. object_name: named object from show()/import_cad_file (default: current shape)."""
+    """Loops on one cross-section plane of a mesh, largest first. Returns JSON {axis, position, loop_count, enclosed_passages, loops:[{points, center, size, min, max, enclosed}]}, all in the two axes that are not `axis`. enclosed_passages counts loops at odd nesting depth, representing passages through material at this height. An open groove reads 0. Works on imported STL shells and solids. axis: X, Y or Z (the plane normal). position: absolute world coordinate. tolerance: tessellation tolerance. weld: point-merge distance when chaining segments. object_name: named object from show()/import_cad_file (default: current shape)."""
     return _resolve_session().mesh_section(object_name, axis, position, tolerance, weld)
 
 
