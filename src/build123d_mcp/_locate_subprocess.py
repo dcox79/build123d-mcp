@@ -19,6 +19,7 @@ import json
 import math
 import sys
 import time
+from typing import cast
 
 # Base triangle budget for the vertex-deflection exact pass. The wall-clock bound
 # comes from the caller's deadline (the parent's own subprocess budget, less the
@@ -114,8 +115,13 @@ def _face_geometry_diagnostics(face) -> dict:
     }
     try:
         surface = BRep_Tool.Surface_s(typed_face)
-        surface_bounds = tuple(float(value) for value in surface.Bounds())
-        trim_bounds = tuple(float(value) for value in BRepTools.UVBounds_s(typed_face))
+        surface_bounds = cast(
+            tuple[float, float, float, float], tuple(float(value) for value in surface.Bounds())
+        )
+        trim_bounds = cast(
+            tuple[float, float, float, float],
+            tuple(float(value) for value in BRepTools.UVBounds_s(typed_face)),
+        )
         if all(math.isfinite(value) for value in surface_bounds + trim_bounds):
             details["surface_uv_domain"] = [round(value, 9) for value in surface_bounds]
             details["trim_uv_bounds"] = [round(value, 9) for value in trim_bounds]
@@ -151,14 +157,17 @@ def _face_geometry_diagnostics(face) -> dict:
                 circle = adaptor.Circle()
                 center = circle.Location()
                 axis = circle.Axis().Direction()
+                radius = float(circle.Radius())
+                center_coords = (float(center.X()), float(center.Y()), float(center.Z()))
+                axis_coords = (float(axis.X()), float(axis.Y()), float(axis.Z()))
                 circle_item = {
                     "edge_index": edge_index,
-                    "radius": float(circle.Radius()),
-                    "center": (float(center.X()), float(center.Y()), float(center.Z())),
-                    "axis": (float(axis.X()), float(axis.Y()), float(axis.Z())),
+                    "radius": radius,
+                    "center": center_coords,
+                    "axis": axis_coords,
                 }
-                item["radius_mm"] = round(circle_item["radius"], 9)
-                item["center"] = [round(value, 6) for value in circle_item["center"]]
+                item["radius_mm"] = round(radius, 9)
+                item["center"] = [round(value, 6) for value in center_coords]
                 circles.append(circle_item)
             except Exception:  # noqa: BLE001 - only circular curves expose Circle()
                 pass

@@ -49,6 +49,11 @@ jobs:
         if: runner.os == 'Linux' && matrix.build123d == '0.11.0' && matrix.python == '3.12'
         run: uv run ruff format --check .
 
+      # Catch a first-call stdio deadlock before the long Windows CAD suite (#452).
+      - name: Windows stdio worker smoke
+        if: runner.os == 'Windows' && matrix.build123d == '0.11.0' && matrix.python == '3.12'
+        run: uv run pytest -q tests/test_windows_worker_stdio.py --timeout=180
+
       - name: Run tests
         run: uv run pytest tests/ -v --timeout=300
 

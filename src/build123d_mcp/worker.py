@@ -23,6 +23,8 @@ import functools
 import inspect
 import json
 import multiprocessing
+import os
+import sys
 import threading
 from collections.abc import Callable
 from typing import Any, NamedTuple, TypeVar, cast
@@ -30,6 +32,60 @@ from typing import Any, NamedTuple, TypeVar, cast
 from build123d_mcp.tools._budget import OP_BUDGET_FLOOR_S
 
 _WORKER_READY_TIMEOUT = 60  # seconds to wait for worker import + ready signal
+_WINDOWS_STD_HANDLE_LOCK = threading.Lock()
+_windows_spawn_nul: Any = None
+
+
+def _start_worker_process(proc: Any) -> None:
+    """Keep MCP stdio pipes out of spawned Windows workers (#452).
+
+    Windows copies the parent's standard handles into a spawn child. A worker
+    holding the server's stdin pipe can block while the server is waiting for
+    the next MCP message. The worker communicates over its dedicated Pipe, so
+    give it NUL for stdin/stdout during process creation; keep stderr for logs.
+    SetStdHandle changes process-wide state, so serialize worker spawns and
+    restore both handles immediately after Process.start() returns.
+    """
+    if sys.platform != "win32":
+        proc.start()
+        return
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    global _windows_spawn_nul
+    with _WINDOWS_STD_HANDLE_LOCK:
+        if _windows_spawn_nul is None:
+            # Keep this handle alive: the child receives it at CreateProcess.
+            _windows_spawn_nul = open(os.devnull, "r+b")
+        nul_handle = msvcrt.get_osfhandle(_windows_spawn_nul.fileno())
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+        kernel32.GetStdHandle.restype = wintypes.HANDLE
+        kernel32.SetStdHandle.argtypes = [wintypes.DWORD, wintypes.HANDLE]
+        kernel32.SetStdHandle.restype = wintypes.BOOL
+        stdin = wintypes.DWORD(-10 & 0xFFFFFFFF)
+        stdout = wintypes.DWORD(-11 & 0xFFFFFFFF)
+        saved_stdin = kernel32.GetStdHandle(stdin)
+        saved_stdout = kernel32.GetStdHandle(stdout)
+        changed_stdin = changed_stdout = False
+        try:
+            if not kernel32.SetStdHandle(stdin, nul_handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+            changed_stdin = True
+            if not kernel32.SetStdHandle(stdout, nul_handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+            changed_stdout = True
+            proc.start()
+        finally:
+            try:
+                if changed_stdout and not kernel32.SetStdHandle(stdout, saved_stdout):
+                    raise ctypes.WinError(ctypes.get_last_error())
+            finally:
+                if changed_stdin and not kernel32.SetStdHandle(stdin, saved_stdin):
+                    raise ctypes.WinError(ctypes.get_last_error())
 
 
 def _build_session(
@@ -487,7 +543,7 @@ class WorkerSession:
             ),
             daemon=True,
         )
-        self._proc.start()
+        _start_worker_process(self._proc)
         child_conn.close()
         self._conn = parent_conn
 
