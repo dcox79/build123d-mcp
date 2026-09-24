@@ -1,8 +1,8 @@
 """Pre-export validity gate.
 
-CADGenBench (and most CAD scorers) apply a hard validity gate before any
-geometric scoring: a submission that is not a well-formed, watertight,
-manifold solid scores ZERO regardless of how close the geometry is. The most
+Strict CAD and mesh consumers apply a hard validity gate before using a
+shape: a file that is not a well-formed, watertight, manifold solid is
+rejected outright regardless of how close the geometry is. The most
 common ways a build123d session produces an invalid artifact are silent —
 an un-fused compound, a leftover 2D sketch as the current shape, an open
 shell, or a degenerate boolean result — so this gate lets the agent confirm
@@ -170,8 +170,8 @@ def _nonmanifold_vertex_count(mf) -> int:
 
     A non-manifold vertex is one where two or more surface sheets meet at a single
     point (e.g. two bodies touching corner-to-corner): the boundary is still
-    edge-manifold and watertight, but it is not a 2-manifold surface, which a CAD
-    scorer rejects (#298). Edge-incidence counts cannot see it — it is purely a
+    edge-manifold and watertight, but it is not a 2-manifold surface, which strict CAD/mesh
+    consumers reject (#298). Edge-incidence counts cannot see it — it is purely a
     vertex-link property.
 
     ``mf`` is an (M, 3) int array of triangles over coordinate-WELDED nodes (so
@@ -396,11 +396,11 @@ def _gate_report(shape, exact: bool = False, mesh_override: MeshGateResult | Non
         brep_valid = bool(BRepCheck_Analyzer(shape.wrapped).IsValid())
     except Exception:
         brep_valid = False
-    # Mesh-level non-manifold check, mirroring how a CAD scorer validates
+    # Mesh-level non-manifold check, mirroring how strict mesh consumers validate
     # (tessellate → check the mesh is manifold). Catches self-touching /
     # coincident-face defects that are valid B-reps the edge-face map above does
-    # not see — the dominant invalid-but-watertight failure mode observed on
-    # CADGenBench (a single solid whose mesh has an edge shared by 4 triangles).
+    # not see — the dominant invalid-but-watertight failure mode seen in practice
+    # (a single solid whose mesh has an edge shared by 4 triangles).
     # Prefer the accurate topology-stitch, bounded by triangle count (generous at
     # export, small inline); above the budget — or if the exact build fails — fall
     # back to the fast coordinate-weld check. mesh_check records which ran.
@@ -462,7 +462,7 @@ def _gate_report(shape, exact: bool = False, mesh_override: MeshGateResult | Non
     if mesh_nm_edges:
         reasons.append(
             f"{mesh_nm_edges} mesh non-manifold edge(s) — faces meet >2-ways "
-            "(self-touch / coincident faces); a CAD scorer rejects this even though "
+            "(self-touch / coincident faces); strict CAD/mesh consumers reject this even though "
             "it looks watertight"
         )
     if mesh_untri_faces:
@@ -486,14 +486,14 @@ def _gate_report(shape, exact: bool = False, mesh_override: MeshGateResult | Non
         reasons.append(
             f"{mesh_nmv} mesh non-manifold vertex/vertices — ≥2 surface sheets meet at a "
             "single point (e.g. bodies touching corner-to-corner); edge-manifold and "
-            "watertight but not a 2-manifold surface, which a CAD scorer rejects"
+            "watertight but not a 2-manifold surface, which strict CAD/mesh consumers reject"
         )
     if mesh_vdefl:
         reasons.append(
             f"{mesh_vdefl} vertex(es) where a tessellated edge endpoint misses its BREP "
             "vertex by more than the mesh deflection — the boundary looks closed by "
             "coordinate proximity but isn't conformal there (a patched/healed face whose "
-            "polygon endpoint is genuinely off-vertex); a CAD scorer's own mesh sanity "
+            "polygon endpoint is genuinely off-vertex); a strict mesh sanity "
             "check rejects this even though it BRepCheck-validates"
         )
     if n_solids == 0 and not open_edges and not nonmanifold_edges:
@@ -502,9 +502,9 @@ def _gate_report(shape, exact: bool = False, mesh_override: MeshGateResult | Non
         reasons.append("no solid body — the current shape is 2D/open geometry, not a solid")
 
     # Non-fatal advisories: things that pass the watertight-manifold gate but
-    # still hurt the geometric score. Disjoint solids are each watertight, so a
-    # mesh scorer accepts them — but a single-part task expects ONE body, and the
-    # extra components tank the topology (component-count) score. Almost always an
+    # still indicate a wrong result. Disjoint solids are each watertight, so a
+    # mesh check accepts them — but a single part should be ONE body, and the
+    # extra components change its topology (component count). Almost always an
     # un-fused result. (Intentional assembly exports via '*' will see this too.)
     warnings: list[str] = []
     if n_solids > 1 and overlaps:
@@ -653,7 +653,7 @@ def _edge_defects(shape) -> tuple[int, int, bool]:
 def _mesh_defects(shape, deadline: float | None = None) -> tuple[int, bool]:
     """Tessellate and count mesh-level non-manifold edges (shared by >2 triangles).
 
-    Mirrors how a CAD scorer validates (B-rep → mesh → manifold check), catching
+    Mirrors how strict mesh consumers validate (B-rep → mesh → manifold check), catching
     self-touching / coincident-face defects that pass BRepCheck and the edge-face
     map (a single watertight solid whose mesh has an edge shared by 4 triangles).
     OCP meshes each face independently, so coincident vertices are welded by
@@ -736,7 +736,7 @@ def _mesh_defects_exact(
 
     Being tolerance-free, it has neither the false positives nor the false
     negatives that ``_mesh_defects``'s coordinate weld produces at the rounding
-    boundary (see #281) — it matches the mesh gate a CAD scorer applies. It is
+    boundary (see #281) — it matches the mesh gate strict consumers apply. It is
     slower (per-edge OCC introspection: ~0.5-2s typical, more on large imported
     B-reps), so callers use it where correctness matters most (export) rather
     than on every interactive validate(). ``max_triangles`` bounds that cost: if
@@ -758,10 +758,10 @@ def _mesh_defects_exact(
     (as this function did before) silently welds a genuinely-off-vertex node
     into place instead of reporting it — a patched/healed face whose polygon
     endpoint misses its vertex by a fraction of a millimetre reads as perfectly
-    closed here even though the same shape fails CADGenBench's own mesh sanity
-    check, which performs exactly this guard and raises on it. Mirrors that
-    check (``cadgenbench.common.mesh``'s vertex-merge guard) so a shape this
-    gate passes actually passes there too. The SAME guard also runs inside the
+    closed here even though the same shape fails a strict mesh sanity check
+    that performs exactly this guard and raises on it. Mirrors that
+    vertex-merge guard so a shape this gate passes also passes such
+    checks. The SAME guard also runs inside the
     open-edge ladder's own, independent vertex-merge (``_open_pass``, below) —
     a defect too small to trip the single check here at the base deflection
     can still be exposed once the ladder escalates to a finer rung while
@@ -807,7 +807,7 @@ def _mesh_defects_exact(
         diag = math.dist((bb.min.X, bb.min.Y, bb.min.Z), (bb.max.X, bb.max.Y, bb.max.Z))
         if diag <= 0:
             return MeshGateResult.unchecked()
-        # Deflection relative to part scale, clamped — matches the scorer.
+        # Deflection relative to part scale, clamped — matches common mesh-sanity checks.
         deflection = min(0.5, max(0.005, diag * 1e-3))
         _open_deadline = (
             deadline if deadline is not None else time.monotonic() + _GATE_MESH_BUDGET_S
@@ -1209,7 +1209,7 @@ def _mesh_defects_exact(
         # Detected on a coordinate-WELDED copy of the base soup (seam-safe; the
         # index-stitch below under-merges seams and would false-positive). A vertex
         # where >=2 surface sheets meet at a single point is edge-manifold and
-        # watertight yet not a 2-manifold surface — a CAD scorer rejects it, and the
+        # watertight yet not a 2-manifold surface — strict CAD/mesh consumers reject it, and the
         # edge-incidence counts cannot see it. Computed once here; reported by all
         # post-stitch returns.
         try:
@@ -1406,8 +1406,8 @@ def validate(session, object_name: str = "") -> str:
     """Report whether a shape would pass a watertight-manifold-solid validity gate.
 
     Returns a one-line PASS/FAIL verdict followed by a JSON report. A FAIL means
-    a STEP/STL export of this shape would be rejected by a CAD scorer (and score
-    zero), so fix it before exporting.
+    a STEP/STL export of this shape would be rejected by strict CAD/mesh
+    consumers, so fix it before exporting.
     """
     shape, err = _resolve_shape(session, object_name)
     if err is not None:

@@ -406,7 +406,7 @@ def _write_step(shape, abs_path: str) -> None:
     ``export_step`` goes through ``STEPCAFControl_Writer`` (the CAF writer that
     carries names/colours). On build123d 0.11 that path raises
     ``RuntimeError: Failed to write STEP file`` on a solid that came straight from
-    ``import_step`` (gumyr/build123d#1356) — hit ~38% of editing-fixture runs,
+    ``import_step`` (gumyr/build123d#1356) — hit ~38% of edits of imported parts,
     where the agent imports a STEP and re-exports the edited solid.
 
     The obvious retry — wrap the solid in a ``Compound`` — gets it through the CAF
@@ -557,14 +557,14 @@ def export_file(session, filename: str, format: str = "step", object_name: str =
     # sanity check that the right, non-degenerate object landed in the file (#241).
     sanity = _sanity_line(shape)
     suffix = f"\n{sanity}" if sanity else ""
-    # For 3D solids, run the validity gate: a CAD scorer rejects a non-watertight
-    # / non-manifold / non-solid STEP or STL outright (score zero), so flag it at
+    # For 3D solids, run the validity gate: strict CAD/mesh consumers reject a non-watertight
+    # / non-manifold / non-solid STEP or STL outright, so flag it at
     # the last possible moment rather than letting an invalid artifact ship.
     if not is_2d:
         from build123d_mcp.tools.validate import _gate_report
 
         # Gate the WRITTEN-AND-REIMPORTED STEP, not the in-memory shape. A CAD
-        # scorer re-imports the file, and serialization can degrade a shape that
+        # consumer re-imports the file, and serialization can degrade a shape that
         # passed in memory (drop a solid, break BRep validity) — so validating the
         # in-memory object gives a false PASS while shipping an invalid file. Re-
         # import what we just wrote and gate that; it is the authoritative artifact
@@ -578,11 +578,11 @@ def export_file(session, filename: str, format: str = "step", object_name: str =
 
                 gate_shape = import_step(step_path)
             except Exception:
-                gate_shape = None  # not even loadable — a scorer would reject it
+                gate_shape = None  # not even loadable — any consumer would reject it
         if gate_shape is None:
             suffix += (
                 "\n⚠ VALIDITY GATE FAIL — the written STEP could not be re-imported; "
-                "a CAD scorer would reject this file (score zero). Fix the solid and re-export "
+                "strict CAD/mesh consumers would reject this file. Fix the solid and re-export "
                 "(the build123d://skill/repair resource has the defect-class repair ladder)."
             )
         elif step_path is not None:
@@ -612,7 +612,7 @@ def export_file(session, filename: str, format: str = "step", object_name: str =
             )
             if not report["passes_gate"]:
                 suffix += (
-                    "\n⚠ VALIDITY GATE FAIL — a CAD scorer would reject this file (score zero): "
+                    "\n⚠ VALIDITY GATE FAIL — strict CAD/mesh consumers would reject this file: "
                     + "; ".join(report["reasons"])
                     + ". Fix the solid and re-export (run validate() for detail; the "
                     "build123d://skill/repair resource has the defect-class repair ladder)."
@@ -628,7 +628,7 @@ def export_file(session, filename: str, format: str = "step", object_name: str =
             report = _gate_report(gate_shape, exact=True)
             if not report["passes_gate"]:
                 suffix += (
-                    "\n⚠ VALIDITY GATE FAIL — a CAD scorer would reject this file (score zero): "
+                    "\n⚠ VALIDITY GATE FAIL — strict CAD/mesh consumers would reject this file: "
                     + "; ".join(report["reasons"])
                     + ". Fix the solid and re-export (run validate() for detail; the "
                     "build123d://skill/repair resource has the defect-class repair ladder)."

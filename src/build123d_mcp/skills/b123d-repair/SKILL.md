@@ -28,8 +28,8 @@ The geometry-changing repair itself should be explicit code in `execute()`,
 with named variables, printed measurements, `save_snapshot()` / rollback
 points, and a visible volume/bbox/gate audit. Do not delegate the repair to an
 opaque MCP tool that silently manipulates the B-rep and returns a shape; that
-prevents the agent from reasoning about design intent and makes benchmark
-success hard to distinguish from accidental geometry surgery.
+prevents the agent from reasoning about design intent and makes a
+successful repair hard to distinguish from accidental geometry surgery.
 
 ---
 
@@ -423,7 +423,7 @@ A **vertex-deflection** failure is a different mesh-only case: the offending
 face is not unmeshable, it's *mispatched* — a prior repair (a sliver sew, a
 tolerance-fudged patch) left its boundary topologically closed but landing a
 fraction of a millimetre off its own BREP vertex, so it reads as closed to
-BRepCheck and even to the open-edge count, yet a CAD scorer's own mesh sanity
+BRepCheck and even to the open-edge count, yet a strict mesh sanity
 check still rejects it. `locate_gate_defects()` gives the vertex's exact
 coordinates. Do not drop this face — the mismatch is a patch-quality problem,
 not an unmeshable one (option 4's drop-and-sew is the wrong tool here): re-patch

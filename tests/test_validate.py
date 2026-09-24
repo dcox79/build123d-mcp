@@ -1,6 +1,6 @@
 """Pre-export validity gate (validate tool + export warning).
 
-The gate mirrors the hard validity check CAD scorers apply before any geometric
+The gate mirrors the hard validity check strict CAD/mesh consumers apply before any geometric
 scoring: a non-watertight / non-manifold / non-solid artifact scores zero. These
 tests pin that a real solid passes and the common invalid-artifact shapes (2D
 sketch, open shell, un-fused/degenerate result) fail with actionable reasons.
@@ -70,7 +70,7 @@ def test_free_annotation_edges_ignored(session):
 
 def test_mesh_nonmanifold_edge_fails(session):
     """Two solids meeting along a shared edge tessellate to a mesh edge shared by
-    >2 triangles — the dominant invalid-but-watertight CADGenBench failure mode."""
+    >2 triangles — the dominant invalid-but-watertight failure mode."""
     execute_code(
         session,
         "show(Box(10, 10, 10) + Pos(10, 10, 0) * Box(10, 10, 10), 'edge_touch')",
@@ -295,7 +295,7 @@ def test_export_gate_validates_reimported_file_not_memory(session, tmp_path, mon
 
 
 def test_export_gate_warns_when_reimport_fails(session, tmp_path, monkeypatch):
-    """If the written STEP can't even be re-imported, a scorer would reject it —
+    """If the written STEP can't even be re-imported, any consumer would reject it —
     the gate must warn rather than silently pass."""
     import build123d
 
@@ -315,7 +315,7 @@ def test_export_gate_warns_when_reimport_fails(session, tmp_path, monkeypatch):
 # Deterministic unit tests of the counter that drives mesh_open_edges and
 # mesh_nonmanifold_edges, so a regression in that detection is caught in CI even
 # without a large geometric fixture (the full OCC stitch + ladder is validated
-# against the CADGenBench corpus out-of-band).
+# against real-world imported parts out-of-band).
 
 
 def test_edge_incidence_closed_tetrahedron():

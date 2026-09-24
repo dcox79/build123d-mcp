@@ -2,7 +2,7 @@
 
 The validate/export gate says *what* is wrong (``1 non-manifold edge``,
 ``BRepCheck failed``) but never *where*, so the agent repairs blind — chamfer
-here, sew there — burning 50-70 execute() calls per fixture. This returns each
+here, sew there — burning 50-70 execute() calls per repair. This returns each
 defect with **3D coordinates** (and B-rep face/edge identity), turning a blind
 hunt into a targeted fix.
 
@@ -221,7 +221,7 @@ def locate_gate_defects(session, object_name: str = "") -> str:
     ``open_edge`` / ``nonmanifold_edge`` (B-rep edge midpoint), ``mesh_open_edge``
     (an unclosed tessellated boundary — approximate, from a coordinate weld rather
     than the gate's own exact topology-stitched check; re-check with the export
-    gate after a fix), the mesh self-touches a CAD scorer rejects —
+    gate after a fix), the mesh self-touches strict CAD/mesh consumers reject —
     ``mesh_nonmanifold_edge`` and ``mesh_nonmanifold_vertex`` (corner-to-corner
     touch), ``mesh_untriangulated_face`` (a face that fails to tessellate at the
     base tolerance), ``mesh_refined_untriangulated_face`` (a face that only fails
@@ -230,7 +230,7 @@ def locate_gate_defects(session, object_name: str = "") -> str:
     that misses its BREP vertex by more than the mesh deflection — a
     patched/healed face whose boundary is topologically closed but
     geometrically off-vertex; BRepCheck and a coordinate weld both miss this,
-    but a CAD scorer's own mesh sanity check does not). Empty list means the
+    but a strict mesh sanity check does not). Empty list means the
     part passes the structural checks. The JSON also includes ``diagnosis``:
     counts by defect kind, the primary defect class, repair-family labels, and
     next steps that keep the repair as explicit build123d/OCP code in

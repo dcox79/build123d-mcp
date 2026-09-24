@@ -160,7 +160,7 @@ def _weld(shape, deadline: float | None = None) -> tuple[list, dict]:
 
 
 def _mesh_nonmanifold_edges(welded, coord) -> list:
-    """Mesh edges shared by >2 triangles (self-touch a scorer rejects), with midpoint."""
+    """Mesh edges shared by >2 triangles (self-touch strict consumers reject), with midpoint."""
     from collections import Counter
 
     edge_count: Counter = Counter()
@@ -178,8 +178,8 @@ def _mesh_nonmanifold_edges(welded, coord) -> list:
                     "where": mid,
                     "shared_by_triangles": n,
                     "hint": (
-                        "two surface sheets meet >2-ways here (BRepCheck-valid but a CAD scorer "
-                        "rejects it) — a self-touch; cut a thin relief or redo the boolean"
+                        "two surface sheets meet >2-ways here (BRepCheck-valid but strict CAD/mesh consumers "
+                        "reject it) — a self-touch; cut a thin relief or redo the boolean"
                     ),
                 }
             )
@@ -219,8 +219,8 @@ def _mesh_open_edges(welded, coord) -> list:
 
 def _mesh_nonmanifold_vertices(welded, coord) -> list:
     """Mesh vertices where ≥2 surface sheets meet at a single point (corner-to-corner
-    touch) — edge-manifold and watertight but not a 2-manifold surface, which a CAD
-    scorer rejects (#298). Mirrors the gate's _nonmanifold_vertex_count: a manifold
+    touch) — edge-manifold and watertight but not a 2-manifold surface, which strict CAD/mesh
+    consumers reject (#298). Mirrors the gate's _nonmanifold_vertex_count: a manifold
     vertex's incident triangles form one connected fan, a pinch forms ≥2."""
     from collections import defaultdict
 
@@ -254,7 +254,7 @@ def _mesh_nonmanifold_vertices(welded, coord) -> list:
                     "where": [round(c[0], 3), round(c[1], 3), round(c[2], 3)],
                     "hint": (
                         "two surface sheets meet at a single point (corner-to-corner touch) — "
-                        "BRepCheck-valid but a CAD scorer rejects it; separate the bodies or add "
+                        "BRepCheck-valid but strict CAD/mesh consumers reject it; separate the bodies or add "
                         "material so they fuse into one manifold solid"
                     ),
                 }

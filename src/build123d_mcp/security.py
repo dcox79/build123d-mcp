@@ -164,7 +164,7 @@ ALLOW_ALL_IMPORTS: bool = False
 # When True, ALL sandbox layers are disabled: the AST check is skipped and the
 # exec namespace gets unrestricted builtins (open/eval/exec/__import__).  Set via
 # --no-sandbox / BUILD123D_NO_SANDBOX. For trusted environments only (e.g. an
-# isolated benchmark harness); never expose to untrusted input.
+# isolated batch pipeline); never expose to untrusted input.
 DISABLE_SANDBOX: bool = False
 
 # Extra root modules added to the allowlist by the user, on top of IMPORT_ALLOWLIST.

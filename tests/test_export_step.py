@@ -2,7 +2,7 @@
 
 build123d 0.11.0's high-level ``export_step`` (the ``STEPCAFControl_Writer`` path)
 raises ``RuntimeError: Failed to write STEP file`` on many imported-STEP-derived
-solids that 0.10.0 wrote fine — it hit ~38% of editing-fixture benchmark runs.
+solids that 0.10.0 wrote fine — it hit ~38% of edits of imported parts.
 ``_write_step`` accepts high-level output only when single-solid files are flat,
 then falls back to the basic ``STEPControl_Writer`` (geometry only). These tests
 pin the happy path, the forced fallback (high-level writer made to raise, so it
