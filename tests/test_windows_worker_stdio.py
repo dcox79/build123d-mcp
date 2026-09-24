@@ -81,7 +81,8 @@ def test_first_stdio_calls_do_not_wait_for_another_message():
         )
         health = reply_for(3)
         assert "result" in health and not health["result"].get("isError")
-        assert any('"ok": true' in item.get("text", "") for item in health["result"]["content"])
+        health_report = json.loads(health["result"]["content"][0]["text"])
+        assert health_report["ok"] is True
     finally:
         proc.kill()
         proc.wait(timeout=10)
