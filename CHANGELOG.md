@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.3.86
+
+### Changed
+
+- **No benchmark-specific wording in the MCP.** Tool descriptions, gate messages,
+  skills and `llms.md` no longer name a particular benchmark or talk about
+  "scorers" and "score zero"; they describe what strict CAD and mesh consumers
+  accept. Wording only — no behaviour or threshold changes. Benchmark-specific
+  guidance belongs in the harness that drives the MCP.
+- **`recognise_features()` explains invalid-solid failures.** When recognition
+  fails because the shape is not a valid solid, the error now says so and points
+  to `build123d://skill/repair` (repair, validate, then recognise again), keeping
+  the recogniser's own message as `recogniser_detail`.
+
 ## v0.3.85
 
 ### Changed

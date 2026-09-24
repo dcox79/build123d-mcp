@@ -254,7 +254,7 @@ diagnostic checkpoint:
    unresolved dominant mismatch remains actionable even after `validate()` passes.
 5. After any cosmetic radius pass, re-run `find_holes` / `find_bosses` /
    relevant recognizers. Reject a fillet/chamfer that changes a through-bore
-   diameter/depth, feature count, or scored interface.
+   diameter/depth, feature count, or mating interface.
 
 Field-proven decision rules:
 
@@ -419,8 +419,8 @@ high-face-count boolean) still can't fit, drop out of the session for that one o
 
 1. Final `measure()` against the spec: envelope, volume sanity, hole inventory.
 2. **`validate("part")` before exporting.** A STEP/STL that is not a watertight,
-   manifold, single solid is rejected outright by CAD scorers and downstream
-   tooling (CADGenBench scores it zero) — no matter how close the geometry is.
+   manifold, single solid is rejected outright by strict CAD and mesh
+   consumers — no matter how close the geometry is.
    A `FAIL` here almost always means the current shape is a leftover 2D sketch,
    an open shell, an un-fused compound (`Part() + ...`), or a degenerate boolean
    result; fix it and re-validate until it passes.

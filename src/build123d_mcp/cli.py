@@ -127,7 +127,7 @@ Part library file format (Python, any .py file under --library path):
         default=os.environ.get("BUILD123D_NO_SANDBOX", "").lower() in ("1", "true", "yes"),
         help="Disable ALL execute() sandbox layers: the AST check is skipped and user "
         "code runs with unrestricted builtins (open/eval/exec/__import__ available). "
-        "DANGEROUS — for trusted, isolated environments only (e.g. a benchmark harness). "
+        "DANGEROUS — for trusted, isolated environments only (e.g. an isolated batch pipeline). "
         "Implies --allow-all-imports. Overrides BUILD123D_NO_SANDBOX env var.",
     )
     parser.add_argument(
@@ -214,7 +214,7 @@ Part library file format (Python, any .py file under --library path):
         "--disable-tool-groups",
         default=os.environ.get("BUILD123D_DISABLE_TOOL_GROUPS", ""),
         help="Comma-separated optional tool groups to NOT register, to slim the tool "
-        "surface for context-sensitive deployments (fleets, benchmark harnesses). "
+        "surface for context-sensitive deployments (fleets, automated pipelines). "
         "Currently: 'drawing' (the 2D drawing-authoring suite). The part-library tools "
         "auto-hide when no --library is set. Overrides BUILD123D_DISABLE_TOOL_GROUPS.",
     )

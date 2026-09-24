@@ -90,7 +90,7 @@ def prepare_drawing(
     layout_ink &= ~rules
 
     # Associate nearby object lines, dimensions and labels while preserving the
-    # whitespace between distinct views on a typical benchmark sheet.
+    # whitespace between distinct views on a typical drawing sheet.
     dy = max(5, min(25, round(height * 0.004)))
     dx = max(5, min(25, round(width * 0.004)))
     grouped = ndimage.binary_dilation(layout_ink, structure=np.ones((dy, dx), dtype=bool))

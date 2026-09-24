@@ -152,7 +152,7 @@ show(part, "edited")
 print(measure(part))
 ```
 
-Then run the MCP `validate("edited")` tool. For handoff or benchmark output,
+Then run the MCP `validate("edited")` tool. For handoff or final output,
 run `export("edited.step", "step", object_name="edited")` so the written STEP is
 checked too.
 
