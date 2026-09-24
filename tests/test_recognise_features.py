@@ -129,3 +129,25 @@ def test_pockets_are_section_recesses_and_non_target_fields_are_hidden(pocketed_
     listed = unknown["targetable_families"]
     assert "section_recesses" in listed
     assert not [name for name in listed if name.endswith(("_patterns", "_refusals"))]
+
+
+def test_invalid_solid_gets_repair_guidance_not_opaque_recogniser_error():
+    session = Session()
+    session.execute(
+        """
+from build123d import *
+from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeSolid
+from OCP.TopoDS import TopoDS
+with BuildPart() as bp:
+    Box(60, 40, 10)
+    with Locations((20, 0, 5)):
+        Hole(4)
+open_shell = Shell(bp.part.faces()[1:])
+bad = Solid(BRepBuilderAPI_MakeSolid(TopoDS.Shell_s(open_shell.wrapped)).Solid())
+show(bad, 'bad')
+"""
+    )
+    report = json.loads(recognise_features(session, "bad"))
+    assert "Recognition needs a valid solid" in report["error"]
+    assert "build123d://skill/repair" in report["error"]
+    assert "valid solid" in report["recogniser_detail"]
