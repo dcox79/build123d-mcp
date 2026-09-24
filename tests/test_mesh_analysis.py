@@ -205,3 +205,19 @@ def test_invalid_mesh_section_weld_is_rejected(session):
     session.execute(_BAR)
     with pytest.raises(ValueError, match="weld"):
         mesh_section(session, "bar", weld=0)
+
+
+@pytest.mark.parametrize("width,height", [(5, 8), (6, 6)])
+def test_polygonal_duct_is_not_reported_as_round_hole(session, width, height):
+    session.execute(
+        f"part = Box(30, 30, 20) - Box({width}, {height}, 30)\nshow(part, 'rectangular_duct')"
+    )
+    section = json.loads(mesh_section(session, "rectangular_duct", position=0))
+    assert section["enclosed_passages"] == 1
+    assert _holes(session, "rectangular_duct") == []
+
+
+def test_excessive_slice_count_is_rejected(session):
+    session.execute(_BAR)
+    with pytest.raises(ValueError, match="slices"):
+        mesh_holes(session, "bar", slices=100_000)

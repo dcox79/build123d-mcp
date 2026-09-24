@@ -20,6 +20,8 @@ import json
 import math
 
 _MAX_TRIANGLES = 50_000
+_MAX_SLICES = 256
+_MAX_SLICE_WORK = _MAX_TRIANGLES * (48 + 24)
 
 _AXES = {"X": 0, "Y": 1, "Z": 2}
 
@@ -255,7 +257,7 @@ def mesh_holes(
         min_diameter: keep loops at least this wide
         max_diameter: keep loops at most this wide. The defaults cover M2-M8
             clearance holes, counterbores and heat-set insert pockets.
-        slices: sample planes per axis
+        slices: sample planes per axis (up to 256, subject to mesh size)
         min_depth: drop features shallower than this. Chamfer rings and
             tessellation slivers read as very shallow holes.
         tolerance: tessellation tolerance
@@ -272,13 +274,13 @@ def mesh_holes(
     its own axis, so scanning a single axis finds a fraction of the part.
 
     This is the mesh counterpart to find_holes(), which needs real topology and
-    returns nothing for an imported STL. It reports what the cross-sections
-    show and does not classify counterbores, countersinks or thread forms.
+    returns nothing for an imported STL. It keeps approximately circular
+    loops and does not classify counterbores, countersinks or thread forms.
     """
     from build123d_mcp.tools.measure import _resolve_shape
 
-    if slices < 1:
-        raise ValueError("slices must be at least 1")
+    if not 1 <= slices <= _MAX_SLICES:
+        raise ValueError(f"slices must be between 1 and {_MAX_SLICES}")
     if not math.isfinite(weld) or weld <= 0:
         raise ValueError("weld must be a positive finite number")
     if not 0 < min_diameter <= max_diameter:
@@ -288,6 +290,8 @@ def mesh_holes(
 
     shape = _resolve_shape(session, object_name)
     tris = _triangles(shape, tolerance)
+    if len(tris) * (slices + 24) > _MAX_SLICE_WORK:
+        raise ValueError("slices too high for this mesh; lower slices or raise tolerance")
     bb = shape.bounding_box()
     lo = (bb.min.X, bb.min.Y, bb.min.Z)
     hi = (bb.max.X, bb.max.Y, bb.max.Z)
@@ -459,9 +463,25 @@ def _keys_at(tris, ax: int, value: float, weld: float, min_d: float, max_d: floa
             continue  # an outline, or a disjoint piece of one - not a bore
         rec = _loop_record(loop, ax)
         dia = max(rec["size"])
-        if min_d <= dia <= max_d:
+        if min_d <= dia <= max_d and _roughly_circular(loop, ax):
             keys.append((round(rec["center"][0], 1), round(rec["center"][1], 1), round(dia, 1)))
     return keys
+
+
+def _roughly_circular(loop, axis: int) -> bool:
+    """Reject slots and polygonal ducts before assigning a bore diameter."""
+    poly = _to_2d(loop, axis)
+    if len(poly) < 5:
+        return False
+    us, vs = zip(*poly)
+    width, height = max(us) - min(us), max(vs) - min(vs)
+    if max(width, height) == 0 or min(width, height) / max(width, height) < 0.85:
+        return False
+    perimeter = sum(
+        math.hypot(x2 - x1, y2 - y1) for (x1, y1), (x2, y2) in zip(poly, poly[1:] + poly[:1])
+    )
+    area = abs(sum(x1 * y2 - x2 * y1 for (x1, y1), (x2, y2) in zip(poly, poly[1:] + poly[:1]))) / 2
+    return perimeter > 0 and 4 * math.pi * area / perimeter**2 >= 0.85
 
 
 def _refine_span(tris, ax, key, run, step, lo, hi, weld, min_d, max_d):
