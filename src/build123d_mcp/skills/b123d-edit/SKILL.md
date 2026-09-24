@@ -19,17 +19,17 @@ Before editing, capture what exists.
 4. Capture numeric evidence:
 
    ```python
-   save_snapshot("before_edit")
    print(measure(part))
    ```
 
 5. Run the MCP `validate()` tool on the registered baseline. For tasks whose
-   deliverable is an exported solid, or where downstream CAD consumers will read
-   a STEP/STL/BREP file, also export the unchanged baseline to a safe throwaway
-   path such as `_baseline_gate.step` and read the export gate result. The
-   throwaway baseline gate must never use the final deliverable path, such as
-   `output.step`. For script-only work, a successful rebuild plus `validate()`
-   is the baseline proof unless the task later requires a file export.
+   deliverable is an exported STEP, use `bank_candidate()` with the real output
+   path and `snapshot_name="valid_baseline"`. It writes privately, runs the
+   written-and-reimported gate, and promotes both the file and snapshot only on
+   PASS. For other CAD formats, export the unchanged baseline to a safe
+   throwaway path and read the export gate result. For script-only work, a
+   successful rebuild plus `validate()` is the baseline proof unless the task
+   later requires a file export.
 6. If the baseline fails the relevant proof (`validate()` for script-only work;
    `validate()` plus the throwaway export gate for exported-solid work), stop
    and switch to `build123d://skill/repair`. Until a repaired baseline passes
@@ -38,8 +38,8 @@ Before editing, capture what exists.
    target feature while the baseline is still invalid. Do not combine a feature
    edit with geometry repair unless the requested edit is the repair.
 7. After the baseline passes the relevant proof, save a snapshot such as
-   `save_snapshot("valid_baseline")`. Only then begin the requested feature or
-   parameter edit.
+   `save_snapshot("valid_baseline")` if `bank_candidate()` did not already do
+   so. Only then begin the requested feature or parameter edit.
 
 For file-based work, keep the source of truth in the Python file. The MCP
 session is the proving ground, not the only copy of the edit.
@@ -60,8 +60,8 @@ Classify the edit before changing code:
 - **Validity edit**: change construction so the output remains manifold.
   Use `validate()`, `locate_gate_defects()`, `find_bored_bosses()`,
   `repair_advice()`, and the repair skill only for diagnostics and patterns.
-  `find_bored_bosses()` is useful before extending a square/rounded-square
-  boss with a central bore: it reports candidate bore axes, cap faces, split
+  `find_bored_bosses()` is useful before lengthening any boss that carries
+  a bore: it reports candidate bore axes, cap faces, split
   caps, and construction warnings. `repair_advice()` is especially useful when
   the intended edit is generic but topology-sensitive, such as extending a
   bored boss, moving an annular shoulder, or fixing an export-roundtrip sliver
@@ -94,6 +94,21 @@ Use `measure()` face inventory, `find_holes()`, `find_hole_patterns()`,
 the feature in code. For spatial edits, render with labels or use
 `render_view(highlights=...)` to confirm the face/edge index before changing
 construction.
+
+For an imported B-rep with no feature history, call `recognise_features()`
+without `families` once for the compact shared inventory, then request only the
+likely family, for example `families="holes"` or `families="blends"`. Each
+returned `@feature[...]` handle can be resolved inside `execute()` with
+`recognition_faces(handle)` for all constituent faces, or
+`recognition_faces(handle, role="defining")` for the minimum recognition
+evidence. The default caller-coordinate records agree with the imported model;
+use `coordinate_frame="part"` only when a part-relative frame is useful. Handles
+are run-local and deliberately fail after their named source geometry is
+replaced, so recognise again after an edit. Empty families are explicit misses,
+not permission to substitute a nearby feature. Pockets, channels, blind slots and
+passages are all reported as `section_recesses`; a record whose `record_type`
+is `SectionRecessRefusal` means a recess was detected but its geometry was not
+proved, so do not reconstruct from it.
 
 ## Step 3 - Make One Explicit Edit
 
@@ -137,9 +152,10 @@ show(part, "edited")
 print(measure(part))
 ```
 
-Then run the MCP `validate("edited")` tool. For handoff or benchmark output,
-run `export("edited.step", "step", object_name="edited")` so the written STEP is
-checked too.
+Then run the MCP `validate("edited")` tool. For handoff or final STEP output,
+run `bank_candidate("edited.step", object_name="edited", snapshot_name="final")`
+so the written STEP replaces the safe floor only after its gate passes. Use
+`export()` for diagnostic writes or non-STEP formats.
 
 Then choose the evidence that matches the edit:
 
@@ -184,9 +200,10 @@ add these checks to the loop:
   collision tests near facet noise, compare against an unchanged control and sweep
   a small allowance rather than trusting one absolute overlap volume.
 
-`export()` is the final gate because it checks the written and re-imported STEP.
-A `validate()` pass in memory is useful but not the final acceptance proof.
-If the edited shape fails this gate, call `repair_advice(error_text=..., goal=...)`
+The gate inside `bank_candidate()` is final because it checks the written and
+re-imported STEP without overwriting an existing good output on failure. A
+`validate()` pass in memory is useful but not the final acceptance proof. If the
+edited shape fails this gate, call `repair_advice(error_text=..., goal=...)`
 before improvising OCP surgery. Use the returned recipe as a checklist for a
 visible `execute()` implementation, not as permission to make an opaque B-rep
 mutation.
@@ -265,7 +282,7 @@ solids, ask the MCP for a recipe before trying variants:
 ```text
 repair_advice(
   error_text="<validate/export failure text>",
-  goal="extend the square boss with rounded corners and central bore by 10mm",
+  goal="lengthen the flanged boss and its through bore by 8mm",
   context="<locate_gate_defects or compare(a='before', b='candidate', kind='shape') notes>"
 )
 ```

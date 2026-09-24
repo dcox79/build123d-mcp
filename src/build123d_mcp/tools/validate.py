@@ -1,8 +1,8 @@
 """Pre-export validity gate.
 
-CADGenBench (and most CAD scorers) apply a hard validity gate before any
-geometric scoring: a submission that is not a well-formed, watertight,
-manifold solid scores ZERO regardless of how close the geometry is. The most
+Strict CAD and mesh consumers apply a hard validity gate before using a
+shape: a file that is not a well-formed, watertight, manifold solid is
+rejected outright regardless of how close the geometry is. The most
 common ways a build123d session produces an invalid artifact are silent —
 an un-fused compound, a leftover 2D sketch as the current shape, an open
 shell, or a degenerate boolean result — so this gate lets the agent confirm
@@ -87,6 +87,19 @@ _MESH_GATE_MIN_S = 10.0
 # small/moderate open part still ladders and is caught; only large parts degrade.
 _LADDER_BASE_MAX_TRIS = 40000
 
+# Pairwise solid intersection is O(n^2) booleans, so the sweep is bounded twice: a
+# bounding-box reject skips pairs that cannot possibly touch, and the whole sweep
+# gets a small wall-clock budget. validate()'s op budget is 60s and the mesh gate
+# already claims 35s of it, so this stays deliberately small. Over budget (or above
+# the body ceiling) the check reports "not determined" rather than a partial answer —
+# it degrades to "unknown", never to a false verdict, matching the mesh gate.
+_OVERLAP_BUDGET_S = 5.0
+_OVERLAP_MAX_SOLIDS = 64
+
+# Below this the bodies are touching (a shared face), not interpenetrating. Matches
+# the threshold clearance() uses to separate "touching" from "interpenetrating".
+_OVERLAP_MIN_VOLUME = 1e-6
+
 _VertexDeflectionKey = tuple[float, float, float]
 _VertexDeflectionEvidence = dict[_VertexDeflectionKey, tuple[float, float]]
 
@@ -157,8 +170,8 @@ def _nonmanifold_vertex_count(mf) -> int:
 
     A non-manifold vertex is one where two or more surface sheets meet at a single
     point (e.g. two bodies touching corner-to-corner): the boundary is still
-    edge-manifold and watertight, but it is not a 2-manifold surface, which a CAD
-    scorer rejects (#298). Edge-incidence counts cannot see it — it is purely a
+    edge-manifold and watertight, but it is not a 2-manifold surface, which strict CAD/mesh
+    consumers reject (#298). Edge-incidence counts cannot see it — it is purely a
     vertex-link property.
 
     ``mf`` is an (M, 3) int array of triangles over coordinate-WELDED nodes (so
@@ -257,6 +270,84 @@ def _run_mesh_gate_subprocess(step_path: str, timeout: float) -> MeshGateResult 
     return None
 
 
+def _solid_overlaps(
+    shape, deadline: float | None = None
+) -> tuple[list[tuple[int, int, float, str]], bool]:
+    """Find interpenetrating pairs among a shape's solids.
+
+    Returns ``(overlaps, checked)``, where each overlap is
+    ``(index_a, index_b, intersection_volume, kind)`` and ``kind`` is
+    ``"containing"`` when one body swallows the other or ``"interpenetrating"``
+    for a partial overlap — the same two words ``clearance()`` uses, so the two
+    tools describe the same relationship the same way. The volumes are PAIRWISE
+    intersections: a region shared by three or more bodies appears in several
+    pairs, so their sum over-counts the excess material and is not something a
+    caller should subtract from the summed volume. ``checked`` is False when the
+    sweep could not be completed — too many bodies, out of budget, or a boolean
+    that failed — and the caller must then NOT claim the bodies are disjoint.
+
+    A solid count alone cannot tell separate bodies from interpenetrating ones:
+    both are watertight, both pass the B-rep and mesh gates, and ``shape.volume``
+    SUMS them, so an overlapping pair reports more material than the part has
+    (#453). Only an actual intersection test distinguishes the two, which is why
+    the gate previously called an interpenetrating pair "disjoint" and exported
+    it without complaint.
+    """
+    try:
+        solids = shape.solids()
+    except Exception:
+        return [], False
+    n = len(solids)
+    if n < 2:
+        return [], True
+    if n > _OVERLAP_MAX_SOLIDS:
+        return [], False
+    try:
+        boxes = [s.bounding_box() for s in solids]
+        volumes = [float(s.volume) for s in solids]
+    except Exception:
+        return [], False
+
+    overlaps: list[tuple[int, int, float, str]] = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            if deadline is not None and time.monotonic() > deadline:
+                return overlaps, False
+            a, b = boxes[i], boxes[j]
+            # Separated on any axis → cannot intersect. Skips the expensive
+            # boolean for the overwhelming majority of pairs in a real assembly.
+            if (
+                a.max.X < b.min.X - _EPS
+                or b.max.X < a.min.X - _EPS
+                or a.max.Y < b.min.Y - _EPS
+                or b.max.Y < a.min.Y - _EPS
+                or a.max.Z < b.min.Z - _EPS
+                or b.max.Z < a.min.Z - _EPS
+            ):
+                continue
+            try:
+                common = solids[i] & solids[j]
+                volume = float(common.volume) if common is not None else 0.0
+            except Exception:
+                # This pair is undecided, so the sweep as a whole is. Reporting
+                # the pairs found so far as if complete would let an unproven
+                # "disjoint" through, which is the defect being fixed.
+                return overlaps, False
+            if volume > _OVERLAP_MIN_VOLUME:
+                # An intersection equal to the smaller body means it is wholly
+                # inside the larger one. clearance() calls that "containing" and
+                # reserves "interpenetrating" for a partial overlap; matching its
+                # vocabulary keeps two tools from naming one relationship twice.
+                smaller = min(volumes[i], volumes[j])
+                kind = (
+                    "containing"
+                    if smaller > 0.0 and abs(volume - smaller) <= _OVERLAP_MIN_VOLUME
+                    else "interpenetrating"
+                )
+                overlaps.append((i, j, round(volume, 4), kind))
+    return overlaps, True
+
+
 def _gate_report(shape, exact: bool = False, mesh_override: MeshGateResult | None = None) -> dict:
     """Return the validity-gate verdict for a shape as a plain dict.
 
@@ -285,6 +376,13 @@ def _gate_report(shape, exact: bool = False, mesh_override: MeshGateResult | Non
         volume = round(float(shape.volume), 4)
     except Exception:
         volume = 0.0
+    # Run before the mesh gate so a cheap, useful answer exists even when the mesh
+    # analysis later spends its whole budget. `volume` above SUMS the solids, so
+    # whether they overlap decides whether that number double-counts (#453).
+    overlaps, overlap_checked = _solid_overlaps(
+        shape, deadline=time.monotonic() + _OVERLAP_BUDGET_S
+    )
+    pairwise_overlap_volume = round(float(sum(v for _a, _b, v, _k in overlaps)), 4)
     # build123d's `is_manifold` false-negates on closed solids imported from STEP
     # (verified on NIST CAD models — a single closed shell with zero open edges
     # still reports is_manifold=False), so it is NOT a reliable gate. The
@@ -298,11 +396,11 @@ def _gate_report(shape, exact: bool = False, mesh_override: MeshGateResult | Non
         brep_valid = bool(BRepCheck_Analyzer(shape.wrapped).IsValid())
     except Exception:
         brep_valid = False
-    # Mesh-level non-manifold check, mirroring how a CAD scorer validates
+    # Mesh-level non-manifold check, mirroring how strict mesh consumers validate
     # (tessellate → check the mesh is manifold). Catches self-touching /
     # coincident-face defects that are valid B-reps the edge-face map above does
-    # not see — the dominant invalid-but-watertight failure mode observed on
-    # CADGenBench (a single solid whose mesh has an edge shared by 4 triangles).
+    # not see — the dominant invalid-but-watertight failure mode seen in practice
+    # (a single solid whose mesh has an edge shared by 4 triangles).
     # Prefer the accurate topology-stitch, bounded by triangle count (generous at
     # export, small inline); above the budget — or if the exact build fails — fall
     # back to the fast coordinate-weld check. mesh_check records which ran.
@@ -364,7 +462,7 @@ def _gate_report(shape, exact: bool = False, mesh_override: MeshGateResult | Non
     if mesh_nm_edges:
         reasons.append(
             f"{mesh_nm_edges} mesh non-manifold edge(s) — faces meet >2-ways "
-            "(self-touch / coincident faces); a CAD scorer rejects this even though "
+            "(self-touch / coincident faces); strict CAD/mesh consumers reject this even though "
             "it looks watertight"
         )
     if mesh_untri_faces:
@@ -388,14 +486,14 @@ def _gate_report(shape, exact: bool = False, mesh_override: MeshGateResult | Non
         reasons.append(
             f"{mesh_nmv} mesh non-manifold vertex/vertices — ≥2 surface sheets meet at a "
             "single point (e.g. bodies touching corner-to-corner); edge-manifold and "
-            "watertight but not a 2-manifold surface, which a CAD scorer rejects"
+            "watertight but not a 2-manifold surface, which strict CAD/mesh consumers reject"
         )
     if mesh_vdefl:
         reasons.append(
             f"{mesh_vdefl} vertex(es) where a tessellated edge endpoint misses its BREP "
             "vertex by more than the mesh deflection — the boundary looks closed by "
             "coordinate proximity but isn't conformal there (a patched/healed face whose "
-            "polygon endpoint is genuinely off-vertex); a CAD scorer's own mesh sanity "
+            "polygon endpoint is genuinely off-vertex); a strict mesh sanity "
             "check rejects this even though it BRepCheck-validates"
         )
     if n_solids == 0 and not open_edges and not nonmanifold_edges:
@@ -404,12 +502,45 @@ def _gate_report(shape, exact: bool = False, mesh_override: MeshGateResult | Non
         reasons.append("no solid body — the current shape is 2D/open geometry, not a solid")
 
     # Non-fatal advisories: things that pass the watertight-manifold gate but
-    # still hurt the geometric score. Disjoint solids are each watertight, so a
-    # mesh scorer accepts them — but a single-part task expects ONE body, and the
-    # extra components tank the topology (component-count) score. Almost always an
+    # still indicate a wrong result. Disjoint solids are each watertight, so a
+    # mesh check accepts them — but a single part should be ONE body, and the
+    # extra components change its topology (component count). Almost always an
     # un-fused result. (Intentional assembly exports via '*' will see this too.)
     warnings: list[str] = []
-    if n_solids > 1:
+    if n_solids > 1 and overlaps:
+        shown = ", ".join(
+            f"#{a}{'⊃' if k == 'containing' else '+'}#{b} ({v})" for a, b, v, k in overlaps[:5]
+        )
+        kinds = {k for _a, _b, _v, k in overlaps}
+        headline = "CONTAINING" if kinds == {"containing"} else "OVERLAPPING"
+        more = "" if len(overlaps) <= 5 else f" +{len(overlaps) - 5} more"
+        if len(overlaps) == 1:
+            excess = f"the true fused volume is {round(volume - pairwise_overlap_volume, 4)}"
+        else:
+            # With three or more bodies sharing a region, that region appears in
+            # several pairwise intersections, so the pairwise total over-counts the
+            # excess. Subtracting it would replace one wrong number with another.
+            excess = (
+                "the true fused volume is lower — but NOT by the pairwise total, since "
+                "material shared by three or more bodies appears in several pairs; fuse "
+                "and re-measure rather than subtracting"
+            )
+        warnings.append(
+            f"{n_solids} solid bodies with {len(overlaps)} {headline} pair(s): "
+            f"{shown}{more} — pairwise intersection total {pairwise_overlap_volume}. "
+            f"These are NOT disjoint: the reported volume {volume} SUMS the bodies, so "
+            f"overlapping material is counted more than once and {excess}. Fuse them "
+            "(Part() + ... or a.fuse(b)) before export, or the STEP carries more "
+            "material than the part actually has"
+        )
+    elif n_solids > 1 and not overlap_checked:
+        warnings.append(
+            f"{n_solids} solid bodies — whether any INTERPENETRATE was not determined "
+            "(too many bodies, or the intersection sweep ran out of budget), so they "
+            "cannot be assumed disjoint; the reported volume sums the bodies and would "
+            "double-count any overlap. Check suspect pairs with clearance(a, b)"
+        )
+    elif n_solids > 1:
         warnings.append(
             f"{n_solids} disjoint solid bodies — a single-part task expects one fused "
             "solid; fuse them (Part() + ... or a.fuse(b)) or the topology score suffers"
@@ -458,6 +589,9 @@ def _gate_report(shape, exact: bool = False, mesh_override: MeshGateResult | Non
         "passes_gate": passes,
         "n_solids": n_solids,
         "volume": volume,
+        "overlap_check": "exact" if overlap_checked else "undetermined",
+        "overlapping_pairs": len(overlaps),
+        "pairwise_overlap_volume": pairwise_overlap_volume,
         "watertight_manifold": watertight_manifold,
         "open_edges": open_edges,
         "nonmanifold_edges": nonmanifold_edges,
@@ -519,7 +653,7 @@ def _edge_defects(shape) -> tuple[int, int, bool]:
 def _mesh_defects(shape, deadline: float | None = None) -> tuple[int, bool]:
     """Tessellate and count mesh-level non-manifold edges (shared by >2 triangles).
 
-    Mirrors how a CAD scorer validates (B-rep → mesh → manifold check), catching
+    Mirrors how strict mesh consumers validate (B-rep → mesh → manifold check), catching
     self-touching / coincident-face defects that pass BRepCheck and the edge-face
     map (a single watertight solid whose mesh has an edge shared by 4 triangles).
     OCP meshes each face independently, so coincident vertices are welded by
@@ -602,7 +736,7 @@ def _mesh_defects_exact(
 
     Being tolerance-free, it has neither the false positives nor the false
     negatives that ``_mesh_defects``'s coordinate weld produces at the rounding
-    boundary (see #281) — it matches the mesh gate a CAD scorer applies. It is
+    boundary (see #281) — it matches the mesh gate strict consumers apply. It is
     slower (per-edge OCC introspection: ~0.5-2s typical, more on large imported
     B-reps), so callers use it where correctness matters most (export) rather
     than on every interactive validate(). ``max_triangles`` bounds that cost: if
@@ -624,10 +758,10 @@ def _mesh_defects_exact(
     (as this function did before) silently welds a genuinely-off-vertex node
     into place instead of reporting it — a patched/healed face whose polygon
     endpoint misses its vertex by a fraction of a millimetre reads as perfectly
-    closed here even though the same shape fails CADGenBench's own mesh sanity
-    check, which performs exactly this guard and raises on it. Mirrors that
-    check (``cadgenbench.common.mesh``'s vertex-merge guard) so a shape this
-    gate passes actually passes there too. The SAME guard also runs inside the
+    closed here even though the same shape fails a strict mesh sanity check
+    that performs exactly this guard and raises on it. Mirrors that
+    vertex-merge guard so a shape this gate passes also passes such
+    checks. The SAME guard also runs inside the
     open-edge ladder's own, independent vertex-merge (``_open_pass``, below) —
     a defect too small to trip the single check here at the base deflection
     can still be exposed once the ladder escalates to a finer rung while
@@ -673,7 +807,7 @@ def _mesh_defects_exact(
         diag = math.dist((bb.min.X, bb.min.Y, bb.min.Z), (bb.max.X, bb.max.Y, bb.max.Z))
         if diag <= 0:
             return MeshGateResult.unchecked()
-        # Deflection relative to part scale, clamped — matches the scorer.
+        # Deflection relative to part scale, clamped — matches common mesh-sanity checks.
         deflection = min(0.5, max(0.005, diag * 1e-3))
         _open_deadline = (
             deadline if deadline is not None else time.monotonic() + _GATE_MESH_BUDGET_S
@@ -1075,7 +1209,7 @@ def _mesh_defects_exact(
         # Detected on a coordinate-WELDED copy of the base soup (seam-safe; the
         # index-stitch below under-merges seams and would false-positive). A vertex
         # where >=2 surface sheets meet at a single point is edge-manifold and
-        # watertight yet not a 2-manifold surface — a CAD scorer rejects it, and the
+        # watertight yet not a 2-manifold surface — strict CAD/mesh consumers reject it, and the
         # edge-incidence counts cannot see it. Computed once here; reported by all
         # post-stitch returns.
         try:
@@ -1272,8 +1406,8 @@ def validate(session, object_name: str = "") -> str:
     """Report whether a shape would pass a watertight-manifold-solid validity gate.
 
     Returns a one-line PASS/FAIL verdict followed by a JSON report. A FAIL means
-    a STEP/STL export of this shape would be rejected by a CAD scorer (and score
-    zero), so fix it before exporting.
+    a STEP/STL export of this shape would be rejected by strict CAD/mesh
+    consumers, so fix it before exporting.
     """
     shape, err = _resolve_shape(session, object_name)
     if err is not None:

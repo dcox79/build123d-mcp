@@ -23,6 +23,8 @@ import functools
 import inspect
 import json
 import multiprocessing
+import os
+import sys
 import threading
 from collections.abc import Callable
 from typing import Any, NamedTuple, TypeVar, cast
@@ -30,6 +32,60 @@ from typing import Any, NamedTuple, TypeVar, cast
 from build123d_mcp.tools._budget import OP_BUDGET_FLOOR_S
 
 _WORKER_READY_TIMEOUT = 60  # seconds to wait for worker import + ready signal
+_WINDOWS_STD_HANDLE_LOCK = threading.Lock()
+_windows_spawn_nul: Any = None
+
+
+def _start_worker_process(proc: Any) -> None:
+    """Keep MCP stdio pipes out of spawned Windows workers (#452).
+
+    Windows copies the parent's standard handles into a spawn child. A worker
+    holding the server's stdin pipe can block while the server is waiting for
+    the next MCP message. The worker communicates over its dedicated Pipe, so
+    give it NUL for stdin/stdout during process creation; keep stderr for logs.
+    SetStdHandle changes process-wide state, so serialize worker spawns and
+    restore both handles immediately after Process.start() returns.
+    """
+    if sys.platform != "win32":
+        proc.start()
+        return
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    global _windows_spawn_nul
+    with _WINDOWS_STD_HANDLE_LOCK:
+        if _windows_spawn_nul is None:
+            # Keep this handle alive: the child receives it at CreateProcess.
+            _windows_spawn_nul = open(os.devnull, "r+b")
+        nul_handle = msvcrt.get_osfhandle(_windows_spawn_nul.fileno())
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+        kernel32.GetStdHandle.restype = wintypes.HANDLE
+        kernel32.SetStdHandle.argtypes = [wintypes.DWORD, wintypes.HANDLE]
+        kernel32.SetStdHandle.restype = wintypes.BOOL
+        stdin = wintypes.DWORD(-10 & 0xFFFFFFFF)
+        stdout = wintypes.DWORD(-11 & 0xFFFFFFFF)
+        saved_stdin = kernel32.GetStdHandle(stdin)
+        saved_stdout = kernel32.GetStdHandle(stdout)
+        changed_stdin = changed_stdout = False
+        try:
+            if not kernel32.SetStdHandle(stdin, nul_handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+            changed_stdin = True
+            if not kernel32.SetStdHandle(stdout, nul_handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+            changed_stdout = True
+            proc.start()
+        finally:
+            try:
+                if changed_stdout and not kernel32.SetStdHandle(stdout, saved_stdout):
+                    raise ctypes.WinError(ctypes.get_last_error())
+            finally:
+                if changed_stdin and not kernel32.SetStdHandle(stdin, saved_stdin):
+                    raise ctypes.WinError(ctypes.get_last_error())
 
 
 def _build_session(
@@ -233,6 +289,12 @@ def _op_execute(session: Any, args: dict, library_index: Any) -> Any:
     return session.execute(args["code"])
 
 
+def _op_execute_file(session: Any, args: dict, library_index: Any) -> Any:
+    from build123d_mcp.tools.execute_file import execute_file_code
+
+    return execute_file_code(session, **args)
+
+
 def _op_objects_types(session: Any, args: dict, library_index: Any) -> Any:
     return session.objects_types()
 
@@ -400,6 +462,10 @@ class WorkerSession:
     # alternative constructor would hit the same trap).
     _closed: bool = False
 
+    # Same reason: the timeout path reads this, and it must not blow up on an
+    # instance built via __new__.
+    _consecutive_timeouts: int = 0
+
     def __init__(
         self,
         exec_timeout: int = 120,
@@ -445,6 +511,14 @@ class WorkerSession:
         # process by design (crash recovery), which for a deliberately evicted
         # session would undo the eviction and leak the subprocess back.
         self._closed = False
+        # Consecutive op timeouts, reset by any successful reply. A host that
+        # blocks the worker from spawning helper subprocesses fails EVERY op that
+        # shells out — render_view, health_check, the bounded geometry ops — and
+        # each one burns its whole budget, so the timeouts arrive back to back
+        # (#452). A genuinely slow boolean times out once and then succeeds when
+        # retried smaller. The count is what separates the two, and it is only
+        # touched from _do_call, which runs under the lock. (#322)
+        self._consecutive_timeouts = 0
         self._start_worker()
 
     @property
@@ -469,7 +543,7 @@ class WorkerSession:
             ),
             daemon=True,
         )
-        self._proc.start()
+        _start_worker_process(self._proc)
         child_conn.close()
         self._conn = parent_conn
 
@@ -684,6 +758,30 @@ class WorkerSession:
                 )
             return self._do_call(op, args, timeout)
 
+    def _spawn_block_hint(self) -> str:
+        """Point at --in-process once timeouts start repeating.
+
+        An MCP host that prevents the worker from creating grandchild processes
+        makes every op that shells out hang until its budget expires, rather than
+        failing fast: render_view and health_check always, plus the bounded
+        geometry ops (#452, and #143 before it). The symptom is indistinguishable
+        from slow geometry on the FIRST timeout, which is why this stays quiet
+        then — telling someone whose fillet is genuinely too big to switch modes
+        would be wrong, and the degraded mode costs crash containment and op
+        timeouts. Two in a row is no longer plausibly slow geometry.
+        """
+        if self._consecutive_timeouts < 2:
+            return ""
+        return (
+            f" This is timeout {self._consecutive_timeouts} in a row. If they persist across "
+            "different operations — especially render_view or health_check, and especially on "
+            "Windows or a sandboxed MCP host — the worker may be unable to spawn the helper "
+            "subprocesses those ops need, in which case each one hangs until its budget expires "
+            "rather than failing. Relaunch with --in-process or BUILD123D_IN_PROCESS=1 to run "
+            "without them; the import sandbox still applies, but that mode has no crash "
+            "containment and no operation timeouts."
+        )
+
     def _do_call(self, op: str, args: dict, timeout: int) -> Any:
         if not self._proc.is_alive():
             restored, n = self._restart_and_replay()
@@ -697,6 +795,7 @@ class WorkerSession:
             self._kill_worker()
             restored, n = self._restart_and_replay()
             detail = self._recovery_detail(restored, n)
+            self._consecutive_timeouts += 1
             from build123d_mcp.security import ExecutionTimeout
 
             if op == "execute":
@@ -712,9 +811,11 @@ class WorkerSession:
                     f"result."
                 )
             raise RuntimeError(
-                f"Operation '{op}' timed out after {timeout}s; the worker was restarted — {detail}."
+                f"Operation '{op}' timed out after {timeout}s; the worker was restarted — "
+                f"{detail}.{self._spawn_block_hint()}"
             )
 
+        self._consecutive_timeouts = 0
         try:
             response = self._conn.recv()
         except EOFError:
@@ -737,6 +838,17 @@ class WorkerSession:
                 isinstance(res, str) and res.startswith("Error: ExecutionTimeout:")
             ):
                 self._execute_history.append(args["code"])
+            elif op == "execute_file":
+                try:
+                    import json
+
+                    succeeded = bool(json.loads(res).get("ok"))
+                except (TypeError, ValueError):
+                    succeeded = False
+                if succeeded:
+                    # A clean source execution replaces the active namespace, so
+                    # it also becomes the new root of crash-replay history.
+                    self._execute_history[:] = [args["code"]]
             elif op == "reset":
                 self._execute_history.clear()
             return response["result"]
@@ -760,6 +872,17 @@ class WorkerSession:
             return self._call("execute", {"code": code}, self._exec_timeout)
         except (RuntimeError, ExecutionTimeout) as e:
             return f"Error: {e}"
+
+    @_op(_op_execute_file, _exec_budget)
+    def execute_file(
+        self,
+        code: str,
+        source_path: str,
+        source_sha256: str,
+        result_name: str = "",
+        snapshot: str = "",
+    ) -> str:
+        raise NotImplementedError
 
     def reset(self) -> str:
         # Checked before the dead-worker shortcut below, which bypasses _call and
@@ -801,6 +924,15 @@ class WorkerSession:
 
     @_op(_tool(f"{_T}.export:export_file"), _export_budget)
     def export_file(self, filename: str, format: str = "step", object_name: str = "") -> str:
+        raise NotImplementedError
+
+    @_op(_tool(f"{_T}.export:bank_candidate"), _export_budget)
+    def bank_candidate(
+        self,
+        filename: str,
+        object_name: str = "",
+        snapshot_name: str = "",
+    ) -> str:
         raise NotImplementedError
 
     # measure/validate/clearance/cross_sections isolate a large shape's native
@@ -1017,6 +1149,17 @@ class WorkerSession:
 
     @_op(_tool(f"{_T}.find_features:find_hole_patterns"), _GEOMETRY_TIMEOUT)
     def find_hole_patterns(self, object_name: str = "") -> str:
+        raise NotImplementedError
+
+    @_op(_tool(f"{_T}.recognise_features:recognise_features"), _exec_budget)
+    def recognise_features(
+        self,
+        object_name: str = "",
+        families: str = "",
+        coordinate_frame: str = "caller",
+        include_faces: bool = False,
+        max_features: int = 50,
+    ) -> str:
         raise NotImplementedError
 
     @_op(_tool(f"{_T}.align_check:align_check"), _GEOMETRY_TIMEOUT)

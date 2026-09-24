@@ -1,5 +1,209 @@
 # Changelog
 
+## v0.3.87
+
+### Added
+
+- **`bank_candidate()` preserves the last gate-clean STEP.** It writes a candidate
+  privately, validates the written and re-imported STEP, then promotes the file
+  and saves a matching session snapshot only on PASS. A failed gate leaves the
+  previous output in place.
+
+### Fixed
+
+- **Windows MCP stdio workers no longer inherit the server's protocol pipes.**
+  Worker startup gives the child `NUL` standard input and output handles while
+  retaining its dedicated IPC pipe and stderr logging. This addresses the
+  first-call `execute`, `render_view`, and `health_check` hangs reported in #452
+  without requiring `BUILD123D_IN_PROCESS=1`.
+
+## v0.3.86
+
+### Changed
+
+- **No benchmark-specific wording in the MCP.** Tool descriptions, gate messages,
+  skills and `llms.md` no longer name a particular benchmark or talk about
+  "scorers" and "score zero"; they describe what strict CAD and mesh consumers
+  accept. Wording only — no behaviour or threshold changes. Benchmark-specific
+  guidance belongs in the harness that drives the MCP.
+- **`recognise_features()` explains invalid-solid failures.** When recognition
+  fails because the shape is not a valid solid, the error now says so and points
+  to `build123d://skill/repair` (repair, validate, then recognise again), keeping
+  the recogniser's own message as `recogniser_detail`.
+
+## v0.3.85
+
+### Changed
+
+- **Feature recognition now uses [quiddity](https://github.com/pzfreo/quiddity)
+  0.3.4**, the renamed successor of the deprecated `b123d-recognisers` (0.4.14
+  was locked before). `recognise_features()` family names change with it:
+  - `pockets`, `channels`, `prismatic_pockets`, `rectangular_blind_slots`,
+    `round_bottom_blind_slots` and `section_passages` are gone — all are now
+    reported as **`section_recesses`**. A `SectionRecessRefusal` record in that
+    family means a recess was detected but its geometry was not proved.
+  - New targetable family: `gusset_ribs`.
+  - Recogniser output changes inherited from quiddity: turned steps coalesce,
+    coaxial hole stacks split into separate occurrences, bosses exactly matched
+    by a turned step are suppressed, and some records gain fields (e.g.
+    `Slot.end_radius`/`corner_radius`, `Fillet.side`).
+- Pattern and refusal result fields (`*_patterns`, `section_recess_refusals`)
+  are no longer offered as targetable families; requesting one used to return
+  an empty match instead of an error. Singular `section_recess` is accepted.
+
+## v0.3.83
+
+### Changed
+
+- **The engineering-drawing tools are deprecated.** Drawing generation has moved
+  to [draftwright](https://github.com/pzfreo/draftwright), which owns it and
+  publishes its own agent skill; this server will stop carrying a second
+  implementation. `draftwright` is already in the `execute()` import allowlist,
+  so a drawing is built from live session geometry without exporting first —
+  `execute("from draftwright import make_drawing; d = make_drawing(part)")` — and
+  the in-session feedback loop is preserved.
+
+  This release only **announces** it: `inspect_drawing`, `view_axes`,
+  `lint_drawing`, `render_drawing`, `save_drawing_annotations` and
+  `suggest_view_layout` all still work and are still registered by default. The
+  notice appears in each tool's description *and* in its returned text — the
+  description reaches a client once at connect, while an agent already mid-session
+  holds the tool in context and would otherwise never learn the tool had moved.
+  `install_skill()`'s default changes from `drawing` to `modeling`; the drawing
+  skill still installs, with the notice on its status line.
+
+  **If you parse these tools' output:** `inspect_drawing`, `lint_drawing` and
+  `suggest_view_layout` return JSON, and their notice is carried as a leading
+  `_deprecated` field rather than as a text prefix, so `json.loads()` keeps
+  working. The prose-returning tools take a text prefix, and `render_drawing`'s
+  content blocks lead with a text block.
+
+  Planned: off by default in 0.4.0 (opt back in by tool group), removed in 0.5.0.
+  `render_view` is NOT affected in any format — it is model rendering, not drawing,
+  and its 2D pipeline for Sketches stays (#465).
+
+### Fixed
+
+- **Repeated operation timeouts now point at `--in-process`.** An MCP host that
+  prevents the worker from creating grandchild processes makes every op that
+  shells out hang until its budget expires rather than failing — `render_view`
+  and `health_check` always, plus the bounded geometry ops. The only places
+  naming the `--in-process` escape hatch were the worker *start* failures, so a
+  user hitting this burned the full budget per call (150 s for a render) with no
+  pointer to the workaround that fixes it completely.
+
+  The op-timeout message now names it, but only from the second consecutive
+  timeout: one slow boolean is indistinguishable from a blocked spawn, and that
+  mode costs crash containment and operation timeouts, so recommending it on a
+  single timeout would be wrong. The counter resets on any successful call.
+  `execute()` keeps its own guidance (smaller steps, `--exec-timeout`) and is not
+  redirected. This does not diagnose the underlying spawn failure — see #452,
+  which is still open (#452).
+
+- **`render_view` DXF/SVG projections are anchored at the world origin, not the
+  part centroid.** `project_to_viewport` returns 2D coordinates relative to its
+  `look_at` point, and that point was an aggregate of `shape.center()` — so every
+  written coordinate was displaced by the centre of mass. The shape was exact and
+  every radius and span correct; only the origin moved. That made it silent
+  (nothing in the output said the coordinates were relative), part-dependent (the
+  offset scales with asymmetry, so it could not be corrected once and forgotten),
+  and invisible to inspection until the file was placed against other geometry.
+  For a format whose purpose is fabrication handoff, model-absolute coordinates
+  are the contract. Safe to change because the HLR projection is parallel: moving
+  the camera along the view direction changes only where the 2D origin sits,
+  never the projected shape — verified with the part 1e6 mm off-origin and across
+  a 10,000x range of camera distance. SVG shares the helper and gains the same
+  fix; `ExportSVG` auto-fits with a margin, so its appearance is unchanged.
+
+  Also corrects the tool description: DXF is emitted as true `CIRCLE` and `LINE`
+  entities — arcs exact rather than tessellated — not the "parseable polylines"
+  the docs claimed in three places (#455).
+
+- **`resolve()` reports an entity's centre, not a point on it.** build123d's
+  default `.center()` is `CenterOf.GEOMETRY`, the parametric midpoint — which on
+  a closed curve or a cylindrical surface lies *on* the entity, a full radius
+  from the axis. So `resolve()` located a Ø4.5 hole's wall at `(24.25, 12, 5)`
+  instead of `(22, 12, 5)`, and its rim edge a radius off in the same way, while
+  planar faces were correct, which is what made it easy to miss. `resolve()` is
+  the natural tool for locating an entity in order to act on it — a hole callout,
+  a mating axis, a joint position — so each of those was silently off by the
+  radius. Circular edges now use the arc centre and everything else the area/mass
+  centroid; the recogniser family (`find_holes()` et al.) already reported true
+  axes, and a test now pins the two to agree.
+
+  Three related fixes in the same output. A curved face no longer reports a
+  `normal` — a cylinder has no single normal, and `normal_at()` answers for one
+  surface point while reading as though it described the face; it now carries the
+  surface `axis` and `radius` instead, which is what a mating axis or a callout
+  actually needs. That also covers the partial-cylinder case the centre alone
+  cannot: on a fillet the area centroid genuinely lies on the patch, so the axis
+  field is the only thing that locates it. And a list-valued selector now reports
+  its `count` and per-entity descriptors (capped at 50) rather than collapsing to
+  a single aggregate centre with no way to tell how many entities matched — that
+  aggregate was itself offset, because `ShapeList.center()` takes no `CenterOf`
+  argument; it is now averaged from the corrected per-entity centres, so the list
+  and its entities cannot disagree — and averaged over *every* match, not just
+  the first 50 detailed, so a truncated list still reports a whole aggregate. A
+  sphere carries neither axis nor normal, since every axis through its centre is
+  an axis of rotation and naming one would be as arbitrary as a cylinder's
+  normal; its centre and radius already say everything. New `geom_type` field on
+  every descriptor (#456).
+
+- **`validate()` distinguishes interpenetrating solids from disjoint ones.** The
+  gate branched on the solid *count* alone, so two overlapping bodies and two
+  genuinely separate ones produced byte-identical reports — same `passes_gate`,
+  same `volume`, and an advisory asserting they were `disjoint`. Because
+  `shape.volume` sums the solids, an interpenetrating pair reported *more*
+  material than it had (two 20 mm cubes offset by 10 mm reported 16000 against a
+  true fused 12000, a 33.3% overstatement) and `export()` wrote that to STEP
+  without complaint. The gate now runs a pairwise intersection sweep and says
+  which it found: the advisory names the overlapping pairs and their
+  intersection volumes, and states that the reported volume counts overlapping
+  material more than once. A pair where one body wholly contains the other is
+  called `containing`, the same word `clearance()` uses, so the two tools do not
+  name one relationship twice. New report fields `overlap_check`,
+  `overlapping_pairs` and `pairwise_overlap_volume`.
+
+  `export()` surfaces it too. Overlap does not fail the gate, and export only
+  ever read `reasons` (the fail list), so the written STEP previously carried the
+  extra material silently while export's own sanity line restated the summed
+  volume as fact — the case the issue was actually about.
+
+  Two deliberate limits. `passes_gate` is unchanged — an interference fit in an
+  assembly export is legitimate geometry, so this is reported rather than failed.
+  And `pairwise_overlap_volume` is a sum of *pairwise* intersections: a region
+  shared by three or more bodies appears in several pairs, so it over-counts the
+  excess and must not be subtracted from the summed volume. The advisory says so
+  and tells you to fuse and re-measure instead; only with a single overlapping
+  pair does it state the true fused volume outright.
+
+  The sweep is bounded twice — a bounding-box reject skips pairs that cannot
+  touch, and a wall-clock budget plus a 64-body ceiling cap the O(n²) worst case.
+  Over either limit it reports `overlap_check: "undetermined"` and an advisory
+  that the bodies cannot be assumed disjoint, rather than a partial answer. Cost
+  on the ordinary single-solid path is negligible (#453).
+
+- **`cross_sections()` subtracts internal voids instead of adding them.** A
+  section area was computed as outer boundary *plus* every hole, bore and
+  cavity the plane cut, so any slice with an internal void read too large by
+  exactly twice the void area — a 60x40x10 plate with four Ø4.5 bores reported
+  `2442.157` against a true `2314.923` (+5.5%), and a 676-hole part reported
+  +10.4%. `BRepAlgoAPI_Section` returns each closed loop as a separate wire
+  with no record of which contains which; each became its own face and the
+  magnitudes were summed under `abs()`, which discarded the sign that should
+  have subtracted the voids. Loops are now classified by nesting depth —
+  enclosed by an odd number of other loops means void and subtracts, even
+  (zero included) means solid and adds — so several disjoint solid regions in
+  one slice, and an island standing inside a cavity, are all handled. This
+  fired precisely on the advertised "detect internal voids" case: a part with
+  a cavity read *larger* in section than solid stock, while the axis where the
+  same holes cut open notches read correct, which is what kept it hidden. The
+  same code path backs `inspect_part()`'s `sections` block, so its
+  `variation_ratio` and `constant_section` are corrected too. A slice whose
+  loop classification cannot be completed now carries `area_uncertain: true`
+  rather than returning a plausible number, since guessing a loop's sign
+  reproduces the same overstatement (#454).
+
 ## v0.3.82
 
 ### Added

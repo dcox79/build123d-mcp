@@ -877,6 +877,7 @@ def test_mcp_lists_all_tools():
     names = asyncio.run(_mcp_session(run))
     assert names == {
         "execute",
+        "execute_file",
         "render_view",
         "measure",
         "validate",
@@ -885,6 +886,7 @@ def test_mcp_lists_all_tools():
         # verify_spec / suggest_spec are experimental and off by default (#362);
         # test_mcp_experimental_flag_enables_verify_tools covers the --experimental path.
         "export",
+        "bank_candidate",
         "reset",
         # Present over stdio too, where they report the single-session mode
         # rather than doing anything (#428).
@@ -906,6 +908,8 @@ def test_mcp_lists_all_tools():
         "cross_sections",
         "inspect_part",
         "inspect_drawing",
+        "prepare_drawing",
+        "crop_drawing",
         "view_axes",
         "lint_drawing",
         "render_drawing",
@@ -915,6 +919,7 @@ def test_mcp_lists_all_tools():
         "find_bored_bosses",
         "find_countersinks",
         "find_hole_patterns",
+        "recognise_features",
         "resolve",
         "script",
         "install_skill",
@@ -967,6 +972,16 @@ def test_mcp_disable_tool_groups_slims_drawing():
     }
     assert not (drawing & names)
     assert "measure" in names and "render_view" in names
+
+
+@_skip_mcp_on_win
+def test_mcp_exact_tool_surface():
+    async def run(mcp):
+        return _tool_names(await mcp.list_tools())
+
+    wanted = {"execute_file", "measure", "render_view", "validate", "export"}
+    names = asyncio.run(_mcp_session(run, extra_args=("--tools", ",".join(sorted(wanted)))))
+    assert names == wanted
 
 
 def test_register_experimental_tools_gating():

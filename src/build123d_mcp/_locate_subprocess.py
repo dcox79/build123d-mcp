@@ -19,6 +19,7 @@ import json
 import math
 import sys
 import time
+from typing import cast
 
 # Base triangle budget for the vertex-deflection exact pass. The wall-clock bound
 # comes from the caller's deadline (the parent's own subprocess budget, less the
@@ -42,6 +43,144 @@ def _require_mesh_budget(deadline: float | None, operation: str) -> None:
             f"not enough time remains to start {operation} safely — "
             "skipped, other locators still ran"
         )
+
+
+def _domain_overrun(
+    surface_bounds: tuple[float, float, float, float],
+    trim_bounds: tuple[float, float, float, float],
+    tolerance: float = 1e-9,
+) -> dict[str, float]:
+    """Return how far a face trim lies outside its finite surface domain."""
+    su0, su1, sv0, sv1 = surface_bounds
+    tu0, tu1, tv0, tv1 = trim_bounds
+    values = {
+        "u_below": max(0.0, su0 - tu0),
+        "u_above": max(0.0, tu1 - su1),
+        "v_below": max(0.0, sv0 - tv0),
+        "v_above": max(0.0, tv1 - sv1),
+    }
+    return {key: value for key, value in values.items() if value > tolerance}
+
+
+def _near_tangent_circle_pairs(circles: list[dict], tolerance_mm: float = 0.05) -> list[dict]:
+    """Find coplanar circle pairs whose radii are nearly tangent."""
+    out = []
+    for pos, first in enumerate(circles):
+        for second in circles[pos + 1 :]:
+            a1 = first["axis"]
+            a2 = second["axis"]
+            alignment = abs(sum(a * b for a, b in zip(a1, a2, strict=True)))
+            if alignment < 0.999:
+                continue
+            delta = tuple(b - a for a, b in zip(first["center"], second["center"], strict=True))
+            plane_separation = abs(sum(d * a for d, a in zip(delta, a1, strict=True)))
+            if plane_separation > tolerance_mm:
+                continue
+            center_distance = math.sqrt(sum(d * d for d in delta))
+            if center_distance <= tolerance_mm:
+                continue
+            external = abs(center_distance - (first["radius"] + second["radius"]))
+            internal = abs(center_distance - abs(first["radius"] - second["radius"]))
+            mode, residual = min(
+                (("external", external), ("internal", internal)), key=lambda item: item[1]
+            )
+            if residual <= tolerance_mm:
+                out.append(
+                    {
+                        "edge_indices": [first["edge_index"], second["edge_index"]],
+                        "mode": mode,
+                        "center_distance_mm": round(center_distance, 9),
+                        "tangency_residual_mm": round(residual, 9),
+                    }
+                )
+    return out
+
+
+def _face_geometry_diagnostics(face) -> dict:
+    """Compact generic evidence for repairing one malformed/fragile face."""
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
+    from OCP.BRepGProp import BRepGProp
+    from OCP.BRepTools import BRepTools
+    from OCP.GProp import GProp_GProps
+    from OCP.TopAbs import TopAbs_EDGE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+
+    typed_face = TopoDS.Face_s(face)
+    details: dict = {
+        "surface": str(BRepAdaptor_Surface(typed_face).GetType())
+        .split(".")[-1]
+        .replace("GeomAbs_", "")
+    }
+    try:
+        surface = BRep_Tool.Surface_s(typed_face)
+        surface_bounds = cast(
+            tuple[float, float, float, float], tuple(float(value) for value in surface.Bounds())
+        )
+        trim_bounds = cast(
+            tuple[float, float, float, float],
+            tuple(float(value) for value in BRepTools.UVBounds_s(typed_face)),
+        )
+        if all(math.isfinite(value) for value in surface_bounds + trim_bounds):
+            details["surface_uv_domain"] = [round(value, 9) for value in surface_bounds]
+            details["trim_uv_bounds"] = [round(value, 9) for value in trim_bounds]
+            overrun = _domain_overrun(surface_bounds, trim_bounds)
+            if overrun:
+                details["trim_outside_surface_domain"] = {
+                    key: round(value, 9) for key, value in overrun.items()
+                }
+    except Exception:  # noqa: BLE001 - diagnostics are best effort
+        pass
+
+    edges = []
+    circles = []
+    explorer = TopExp_Explorer(typed_face, TopAbs_EDGE)
+    edge_index = -1
+    while explorer.More():
+        edge_index += 1
+        edge = TopoDS.Edge_s(explorer.Current())
+        try:
+            adaptor = BRepAdaptor_Curve(edge)
+            props = GProp_GProps()
+            BRepGProp.LinearProperties_s(edge, props)
+            start = adaptor.Value(adaptor.FirstParameter())
+            end = adaptor.Value(adaptor.LastParameter())
+            item = {
+                "edge_index": edge_index,
+                "curve": str(adaptor.GetType()).split(".")[-1].replace("GeomAbs_", ""),
+                "length_mm": round(props.Mass(), 6),
+                "start": [round(start.X(), 6), round(start.Y(), 6), round(start.Z(), 6)],
+                "end": [round(end.X(), 6), round(end.Y(), 6), round(end.Z(), 6)],
+            }
+            try:
+                circle = adaptor.Circle()
+                center = circle.Location()
+                axis = circle.Axis().Direction()
+                radius = float(circle.Radius())
+                center_coords = (float(center.X()), float(center.Y()), float(center.Z()))
+                axis_coords = (float(axis.X()), float(axis.Y()), float(axis.Z()))
+                circle_item = {
+                    "edge_index": edge_index,
+                    "radius": radius,
+                    "center": center_coords,
+                    "axis": axis_coords,
+                }
+                item["radius_mm"] = round(radius, 9)
+                item["center"] = [round(value, 6) for value in center_coords]
+                circles.append(circle_item)
+            except Exception:  # noqa: BLE001 - only circular curves expose Circle()
+                pass
+            edges.append(item)
+        except Exception:  # noqa: BLE001 - keep other face evidence
+            pass
+        explorer.Next()
+    if edges:
+        details["edge_profile"] = edges
+    tangencies = _near_tangent_circle_pairs(circles)
+    if tangencies:
+        details["near_tangent_circle_pairs"] = tangencies
+    return details
 
 
 def _brep_invalid_faces(solid) -> list:
@@ -81,6 +220,7 @@ def _brep_invalid_faces(solid) -> list:
                         "malformed face — remove/replace this local face explicitly in "
                         "execute() or rebuild the patch"
                     ),
+                    "geometry_diagnostics": _face_geometry_diagnostics(f),
                 }
             )
         e.Next()
@@ -160,7 +300,7 @@ def _weld(shape, deadline: float | None = None) -> tuple[list, dict]:
 
 
 def _mesh_nonmanifold_edges(welded, coord) -> list:
-    """Mesh edges shared by >2 triangles (self-touch a scorer rejects), with midpoint."""
+    """Mesh edges shared by >2 triangles (self-touch strict consumers reject), with midpoint."""
     from collections import Counter
 
     edge_count: Counter = Counter()
@@ -178,8 +318,8 @@ def _mesh_nonmanifold_edges(welded, coord) -> list:
                     "where": mid,
                     "shared_by_triangles": n,
                     "hint": (
-                        "two surface sheets meet >2-ways here (BRepCheck-valid but a CAD scorer "
-                        "rejects it) — a self-touch; cut a thin relief or redo the boolean"
+                        "two surface sheets meet >2-ways here (BRepCheck-valid but strict CAD/mesh consumers "
+                        "reject it) — a self-touch; cut a thin relief or redo the boolean"
                     ),
                 }
             )
@@ -219,8 +359,8 @@ def _mesh_open_edges(welded, coord) -> list:
 
 def _mesh_nonmanifold_vertices(welded, coord) -> list:
     """Mesh vertices where ≥2 surface sheets meet at a single point (corner-to-corner
-    touch) — edge-manifold and watertight but not a 2-manifold surface, which a CAD
-    scorer rejects (#298). Mirrors the gate's _nonmanifold_vertex_count: a manifold
+    touch) — edge-manifold and watertight but not a 2-manifold surface, which strict CAD/mesh
+    consumers reject (#298). Mirrors the gate's _nonmanifold_vertex_count: a manifold
     vertex's incident triangles form one connected fan, a pinch forms ≥2."""
     from collections import defaultdict
 
@@ -254,7 +394,7 @@ def _mesh_nonmanifold_vertices(welded, coord) -> list:
                     "where": [round(c[0], 3), round(c[1], 3), round(c[2], 3)],
                     "hint": (
                         "two surface sheets meet at a single point (corner-to-corner touch) — "
-                        "BRepCheck-valid but a CAD scorer rejects it; separate the bodies or add "
+                        "BRepCheck-valid but strict CAD/mesh consumers reject it; separate the bodies or add "
                         "material so they fuse into one manifold solid"
                     ),
                 }
@@ -448,6 +588,7 @@ def _mesh_refined_untriangulated_faces(shape, deadline: float | None = None) -> 
                     "tolerance; treat it as a fragile/unmeshable sliver and re-patch or "
                     "re-sew the local face before export"
                 ),
+                "geometry_diagnostics": _face_geometry_diagnostics(face),
             }
         )
     if n_tris > _REFINED_UNTRIANGULATED_MAX_TRIS and not out:
@@ -508,12 +649,16 @@ def collect_defects(
             defects += base_untriangulated
         else:
             defects.append({"kind": "locator_error", "detail": repr(exc)[:200]})
+    # The refined-face probe is cheaper and, when the export gate has reported an
+    # untriangulated face, directly identifies the repair target. Run it before the
+    # broader exact vertex-deflection ladder so that ladder cannot consume the
+    # shared deadline and hide the more actionable face evidence on large parts.
     try:
-        defects += _mesh_vertex_deflection_defects(shape, deadline)
+        defects += _mesh_refined_untriangulated_faces(shape, deadline)
     except Exception as exc:  # noqa: BLE001
         defects.append({"kind": "locator_error", "detail": repr(exc)[:200]})
     try:
-        defects += _mesh_refined_untriangulated_faces(shape, deadline)
+        defects += _mesh_vertex_deflection_defects(shape, deadline)
     except Exception as exc:  # noqa: BLE001
         defects.append({"kind": "locator_error", "detail": repr(exc)[:200]})
     return defects

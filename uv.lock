@@ -126,7 +126,7 @@ wheels = [
 
 [[package]]
 name = "build123d-mcp"
-version = "0.3.83.dev0"
+version = "0.3.88.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "augura" },
@@ -135,6 +135,8 @@ dependencies = [
     { name = "build123d-drafting-helpers" },
     { name = "defusedxml" },
     { name = "mcp" },
+    { name = "pillow" },
+    { name = "quiddity" },
     { name = "resvg-py" },
     { name = "scipy" },
     { name = "vtk" },
@@ -162,6 +164,8 @@ requires-dist = [
     { name = "build123d-drafting-helpers", specifier = ">=0.10.0" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "mcp", specifier = ">=2,<3" },
+    { name = "pillow" },
+    { name = "quiddity", specifier = ">=0.3.4,<0.4" },
     { name = "resvg-py" },
     { name = "scipy" },
     { name = "uvicorn", marker = "extra == 'http'" },
@@ -1853,6 +1857,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c9/31/097f2e132c4f16d99a22bfb777e0fd88bd8e1c634304e102f313af69ace5/pywin32-311-cp314-cp314-win32.whl", hash = "sha256:b7a2c10b93f8986666d0c803ee19b5990885872a7de910fc460f9b0c2fbf92ee", size = 8840714, upload-time = "2025-07-14T20:13:32.449Z" },
     { url = "https://files.pythonhosted.org/packages/90/4b/07c77d8ba0e01349358082713400435347df8426208171ce297da32c313d/pywin32-311-cp314-cp314-win_amd64.whl", hash = "sha256:3aca44c046bd2ed8c90de9cb8427f581c479e594e99b5c0bb19b29c10fd6cb87", size = 9656800, upload-time = "2025-07-14T20:13:34.312Z" },
     { url = "https://files.pythonhosted.org/packages/c0/d2/21af5c535501a7233e734b8af901574572da66fcc254cb35d0609c9080dd/pywin32-311-cp314-cp314-win_arm64.whl", hash = "sha256:a508e2d9025764a8270f93111a970e1d0fbfc33f4153b388bb649b7eec4f9b42", size = 8932540, upload-time = "2025-07-14T20:13:36.379Z" },
+]
+
+[[package]]
+name = "quiddity"
+version = "0.3.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "build123d" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ab/cb/9fc0e8c5235fb8e89b2f9142c319da0380fb51d34767c19ff3041251415f/quiddity-0.3.4.tar.gz", hash = "sha256:1e3088d2e04549182a2d7f27ab24db2b3cf5ff2c19f3542ae303805f06cf44b8", size = 17342096, upload-time = "2026-09-22T18:09:55.396Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9a/42/5cb57c0b2e916afd51c6107aca3ca6abf81d63f051ce64c817f0d05cbb4e/quiddity-0.3.4-py3-none-any.whl", hash = "sha256:093ccfc6e144354db5ebc1786c169e1515641400694814a2123bc48f2636e733", size = 518739, upload-time = "2026-09-22T18:09:53.236Z" },
 ]
 
 [[package]]

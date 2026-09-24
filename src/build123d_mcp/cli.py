@@ -127,7 +127,7 @@ Part library file format (Python, any .py file under --library path):
         default=os.environ.get("BUILD123D_NO_SANDBOX", "").lower() in ("1", "true", "yes"),
         help="Disable ALL execute() sandbox layers: the AST check is skipped and user "
         "code runs with unrestricted builtins (open/eval/exec/__import__ available). "
-        "DANGEROUS — for trusted, isolated environments only (e.g. a benchmark harness). "
+        "DANGEROUS — for trusted, isolated environments only (e.g. an isolated batch pipeline). "
         "Implies --allow-all-imports. Overrides BUILD123D_NO_SANDBOX env var.",
     )
     parser.add_argument(
@@ -214,9 +214,16 @@ Part library file format (Python, any .py file under --library path):
         "--disable-tool-groups",
         default=os.environ.get("BUILD123D_DISABLE_TOOL_GROUPS", ""),
         help="Comma-separated optional tool groups to NOT register, to slim the tool "
-        "surface for context-sensitive deployments (fleets, benchmark harnesses). "
+        "surface for context-sensitive deployments (fleets, automated pipelines). "
         "Currently: 'drawing' (the 2D drawing-authoring suite). The part-library tools "
         "auto-hide when no --library is set. Overrides BUILD123D_DISABLE_TOOL_GROUPS.",
+    )
+    parser.add_argument(
+        "--tools",
+        default=os.environ.get("BUILD123D_TOOLS", ""),
+        help="Comma-separated exact tool names to expose. When set, every other tool is "
+        "removed from the advertised MCP surface. Intended for context-sensitive agents "
+        "and controlled evaluations. Overrides BUILD123D_TOOLS.",
     )
     parser.add_argument(
         "--experimental",
@@ -301,7 +308,10 @@ Part library file format (Python, any .py file under --library path):
         server.register_experimental_tools()
 
     disabled_groups = tuple(g.strip() for g in args.disable_tool_groups.split(",") if g.strip())
-    server.apply_tool_visibility(disabled_groups, has_library=bool(args.library))
+    enabled_tools = tuple(t.strip() for t in args.tools.split(",") if t.strip())
+    server.apply_tool_visibility(
+        disabled_groups, has_library=bool(args.library), enabled_tools=enabled_tools
+    )
 
     if args.viewer_socket:
         server.start_viewer(args.viewer_socket)

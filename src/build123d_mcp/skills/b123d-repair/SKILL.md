@@ -28,8 +28,8 @@ The geometry-changing repair itself should be explicit code in `execute()`,
 with named variables, printed measurements, `save_snapshot()` / rollback
 points, and a visible volume/bbox/gate audit. Do not delegate the repair to an
 opaque MCP tool that silently manipulates the B-rep and returns a shape; that
-prevents the agent from reasoning about design intent and makes benchmark
-success hard to distinguish from accidental geometry surgery.
+prevents the agent from reasoning about design intent and makes a
+successful repair hard to distinguish from accidental geometry surgery.
 
 ---
 
@@ -423,7 +423,7 @@ A **vertex-deflection** failure is a different mesh-only case: the offending
 face is not unmeshable, it's *mispatched* — a prior repair (a sliver sew, a
 tolerance-fudged patch) left its boundary topologically closed but landing a
 fraction of a millimetre off its own BREP vertex, so it reads as closed to
-BRepCheck and even to the open-edge count, yet a CAD scorer's own mesh sanity
+BRepCheck and even to the open-edge count, yet a strict mesh sanity
 check still rejects it. `locate_gate_defects()` gives the vertex's exact
 coordinates. Do not drop this face — the mismatch is a patch-quality problem,
 not an unmeshable one (option 4's drop-and-sew is the wrong tool here): re-patch
@@ -466,7 +466,9 @@ tessellation.
 - **Never keep iterating on an invalid solid.** If a rung's attempt fails the
   gate, `restore_snapshot()` back to the pre-attempt state before trying the
   next rung — stacked failed repairs compound.
-- `save_snapshot()` before each rung so the above is one call.
+- `save_snapshot()` before each diagnostic rung. When the candidate is intended
+  to become a durable STEP floor, prefer `bank_candidate()` so a failed gate
+  cannot overwrite that floor or create a misleading snapshot.
 
 ---
 
@@ -476,9 +478,10 @@ When the task is to *modify* an imported part whose STEP is already invalid,
 do not interleave healing with editing:
 
 1. Import, `validate()`, and if it FAILs, run this skill's ladder **first**.
-2. When the healed import passes the export gate, `save_snapshot("valid_baseline")`
-   **and** `export()` it to the real output path — from this moment a valid
-   artifact exists on disk no matter what happens later.
+2. Call `bank_candidate()` with `snapshot_name="valid_baseline"`; it promotes the
+   healed import to the real output path and saves the snapshot only when the
+   written-and-reimported gate passes. From this moment a valid artifact exists
+   on disk no matter what happens later.
 3. Then perform the requested edit on the healed baseline, re-validating after
    each step as usual; re-export only on PASS.
 

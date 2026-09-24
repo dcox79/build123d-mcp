@@ -352,7 +352,7 @@ def inspect_part(
          "patterns":[{"count":1,"type":"bolt_circle"}],
          "section_varying":true, "tolerance":0.1}
 
-    Omit ``expected`` for inventory-only use. No benchmark expectations are built in.
+    Omit ``expected`` for inventory-only use. No task-specific expectations are built in.
     """
     from build123d_mcp.tools._bounded import run_bounded_shape_op
 

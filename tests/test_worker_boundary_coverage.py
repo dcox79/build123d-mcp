@@ -186,6 +186,11 @@ def _find_hole_patterns(ws, tmp_path):
     assert "error" not in r and r["patterns"] == []
 
 
+def _recognise_features(ws, tmp_path):
+    r = json.loads(ws.recognise_features("a"))
+    assert "error" not in r and r["inventory"]["holes"] == 0
+
+
 def _align_check(ws, tmp_path):
     r = json.loads(ws.align_check("a", "b", mode="center"))
     assert "error" not in r and "delta" in r
@@ -285,6 +290,14 @@ def _export_file(ws, tmp_path):
     assert out.exists() and out.stat().st_size > 0
 
 
+def _bank_candidate(ws, tmp_path):
+    out = tmp_path / "banked.step"
+    result = json.loads(ws.bank_candidate(str(out), "a", "banked-floor"))
+    assert result["banked"] is True
+    assert result["snapshot_saved"] is True
+    assert out.exists() and out.stat().st_size > 0
+
+
 def _render_view(ws, tmp_path):
     out = tmp_path / "a.png"
     ws.render_view(objects="a", save_to=str(out))
@@ -315,6 +328,7 @@ SESSION_STATEFUL_TOOLS = {
     "find_bored_bosses": _find_bored_bosses,
     "find_countersinks": _find_countersinks,
     "find_hole_patterns": _find_hole_patterns,
+    "recognise_features": _recognise_features,
     "cross_sections": _cross_sections,
     "mesh_section": _mesh_section,
     "mesh_holes": _mesh_holes,
@@ -331,6 +345,7 @@ SESSION_STATEFUL_TOOLS = {
     "last_error": _last_error,
     "inspect_drawing": _inspect_drawing,
     "export_file": _export_file,
+    "bank_candidate": _bank_candidate,
     "render_view": _render_view,
     "pull_viewer_deltas": _pull_viewer_deltas,
 }
@@ -340,6 +355,7 @@ SESSION_STATEFUL_TOOLS = {
 # to SESSION_STATEFUL_TOOLS or here (see test_every_dispatch_op_is_classified).
 NON_SMOKED_OPS = {
     "execute": "the seeding mechanism itself; exercised by every WorkerSession test",
+    "execute_file": "requires an external Python source file; covered by test_execute_file",
     "reset": "session-lifecycle op; smoke-testing it would clear the seeded worker state",
     "search_library": "reads the worker library index, not Session geometry",
     "load_part": "requires a named library part, not present in the geometry seed",

@@ -67,6 +67,7 @@ _PALETTE = [
 ]
 
 _QUALITY = {
+    "preview": {"linear_deflection": 0.01, "angular_deflection": 0.3},
     "standard": {"linear_deflection": 0.001, "angular_deflection": 0.1},
     "high": {"linear_deflection": 0.0005, "angular_deflection": 0.02},
 }
@@ -432,7 +433,9 @@ def _tessellate_in_process(shapes, tess) -> tuple[dict, list[str]]:
     return meshes, failed
 
 
-def _tessellate_shapes_bounded(shapes, tess) -> tuple[dict, list[str]]:
+def _tessellate_shapes_bounded(
+    shapes, tess, budget_s: int = _TESS_BUDGET_S
+) -> tuple[dict, list[str]]:
     """Tessellate every shape OUT OF PROCESS, hard-bounded by ``_TESS_BUDGET_S``.
 
     Each shape is written to a temp STEP, then ONE subprocess imports and
@@ -482,11 +485,11 @@ def _tessellate_shapes_bounded(shapes, tess) -> tuple[dict, list[str]]:
                 ],
                 capture_output=True,
                 text=True,
-                timeout=_TESS_BUDGET_S,
+                timeout=budget_s,
             )
         except subprocess.TimeoutExpired as exc:
             raise _RenderBudgetExceeded(
-                f"Rendering exceeded the {_TESS_BUDGET_S}s tessellation budget — this part is too "
+                f"Rendering exceeded the {budget_s}s tessellation budget — this part is too "
                 "complex to render at this quality. Try quality='standard', render fewer objects, "
                 "or inspect it numerically with measure()/cross_sections()."
             ) from exc
@@ -522,11 +525,19 @@ def _tessellate_shapes_bounded(shapes, tess) -> tuple[dict, list[str]]:
 
 
 def _do_render_png(
-    shapes, tess, direction, clip_plane, clip_at, azimuth, elevation, labels=None
+    shapes,
+    tess,
+    direction,
+    clip_plane,
+    clip_at,
+    azimuth,
+    elevation,
+    labels=None,
+    tess_budget_s: int = _TESS_BUDGET_S,
 ) -> tuple[bytes, list[str]]:
     # Tessellate shapes out-of-process (bounded) so an un-interruptible BRepMesh
     # on a complex part can't blow the op-timeout and SIGKILL the session.
-    meshes, failed = _tessellate_shapes_bounded(shapes, tess)
+    meshes, failed = _tessellate_shapes_bounded(shapes, tess, tess_budget_s)
     shape_data = [
         (name, meshes[name][0], meshes[name][1], obj_color)
         for name, shape, obj_color in shapes
@@ -642,10 +653,6 @@ def _viewport_origin_for(direction: str, shapes, azimuth: float, elevation: floa
     """
     from build123d import Vector
 
-    # Aggregate bounding centre across all shapes for look_at
-    centres = [shape.center() for _name, shape, _c in shapes]
-    centre = sum(centres, Vector(0, 0, 0)) * (1.0 / len(centres))
-
     # Direction vector matches the VTK camera baseline
     dx, dy, dz = {
         "top": (0.0, 0.0, 1.0),
@@ -684,12 +691,19 @@ def _viewport_origin_for(direction: str, shapes, azimuth: float, elevation: floa
         extents.extend([bb.size.X, bb.size.Y, bb.size.Z])
     distance = max(extents + [1.0]) * 10.0
 
-    origin = (
-        centre.X + dx * distance,
-        centre.Y + dy * distance,
-        centre.Z + dz * distance,
-    )
-    look_at = (centre.X, centre.Y, centre.Z)
+    # Anchor the projection at the WORLD ORIGIN, not the part centroid. The 2D
+    # coordinates project_to_viewport returns are relative to look_at, so an
+    # aggregate-centroid anchor silently displaced every DXF/SVG coordinate by
+    # the centre of mass: exact geometry at a wrong origin, which looks right
+    # until the file is placed against other geometry, and which scales with how
+    # asymmetric the part is so it cannot be corrected once and forgotten (#455).
+    #
+    # Safe because the HLR projection is PARALLEL: moving the camera along the
+    # view direction changes only where the 2D origin sits, never the projected
+    # shape. Verified identical spans with the part 1e6 mm off-origin and across
+    # a 10,000x range of camera distance.
+    origin = (dx * distance, dy * distance, dz * distance)
+    look_at = (0.0, 0.0, 0.0)
     return origin, up, look_at
 
 
@@ -775,7 +789,8 @@ def _do_render_dxf(shapes, direction, clip_plane, clip_at, azimuth, elevation) -
     """Produce a DXF via build123d's HLR projection.
 
     DXF is the standard 2D CAD interchange format. Use it when the LLM (or a
-    downstream tool) needs the projected geometry as parseable polylines
+    downstream tool) needs the projected geometry as parseable entities —
+    true CIRCLE and LINE entities, so arcs stay exact rather than tessellated —
     rather than as a raster — e.g. building a matplotlib annotation overlay
     on top of a faithful base layer instead of redrawing the shape by hand.
 
@@ -1037,12 +1052,24 @@ def render_view(
         requested PNG because the VTK renderer failed
     """
     direction = direction.lower()
-    if direction not in ("top", "front", "side", "iso"):
-        raise ValueError(f"Unknown direction '{direction}'. Use: top, front, side, iso")
+    aliases = {
+        "right": ("side", 0.0, 0.0),
+        "left": ("side", 180.0, 0.0),
+        "rear": ("front", 180.0, 0.0),
+        "bottom": ("top", 0.0, 180.0),
+    }
+    if direction in aliases:
+        direction, alias_azimuth, alias_elevation = aliases[direction]
+        azimuth += alias_azimuth
+        elevation += alias_elevation
+    elif direction not in ("top", "front", "side", "iso"):
+        raise ValueError(
+            f"Unknown direction '{direction}'. Use: top, bottom, front, rear, side, left, right, iso"
+        )
 
     quality = quality.lower()
     if quality not in _QUALITY:
-        raise ValueError(f"Unknown quality '{quality}'. Use: standard, high")
+        raise ValueError(f"Unknown quality '{quality}'. Use: preview, standard, high")
 
     clip_plane = clip_plane.lower()
     if clip_plane and clip_plane not in ("x", "y", "z"):
@@ -1204,11 +1231,35 @@ def render_view(
             result["png"] = png_bytes
             if png_failed:
                 result["png_warnings"] = [f"Tessellation warnings: {', '.join(png_failed)}"]
-        except _RenderBudgetExceeded:
-            # The render already consumed its hard budget; the unbounded SVG (HLR)
-            # fallback below could push the op past the parent watchdog and kill the
-            # session. Surface the clean budget error instead, session intact (#357).
-            raise
+        except _RenderBudgetExceeded as initial_exc:
+            # Retry once with deliberately coarse tessellation and a shorter
+            # second-stage budget. 75s + 40s + overhead remains below the worker's
+            # render watchdog, unlike an unbounded SVG/HLR fallback (#357).
+            if quality == "preview":
+                raise
+            try:
+                png_bytes, png_failed = _do_render_png(
+                    shapes,
+                    _QUALITY["preview"],
+                    direction,
+                    clip_plane,
+                    clip_at,
+                    azimuth,
+                    elevation,
+                    labels=labels,
+                    tess_budget_s=40,
+                )
+                result["png"] = png_bytes
+                result["fallback"] = (
+                    f"Requested quality '{quality}' exceeded its tessellation budget; "
+                    "returned a coarse preview render instead."
+                )
+                warnings = ["Automatic preview-quality fallback was used."]
+                if png_failed:
+                    warnings.append(f"Tessellation warnings: {', '.join(png_failed)}")
+                result["png_warnings"] = warnings
+            except _RenderBudgetExceeded:
+                raise initial_exc
         except Exception as exc:
             if format == "png":
                 # Auto-fallback: produce SVG so the AI still gets a visual.

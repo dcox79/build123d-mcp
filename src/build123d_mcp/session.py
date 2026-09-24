@@ -75,6 +75,13 @@ class Session:
         self.drawing_annotations: dict[str, Any] = {}
         self.drawing_page: dict[str, Any] | None = None
         self.geometry_refs: dict[str, Any] = {}
+        # Run-local quiddity evidence. The public handles resolve through
+        # recognition_faces() below and are rejected when their source object has
+        # been replaced; opaque package references never cross the MCP wire.
+        self._recognition_runs: dict[tuple[str, str], dict[str, Any]] = {}
+        self._recognition_targets: dict[str, dict[str, Any]] = {}
+        self._recognition_next_run = 1
+        self.source_provenance: dict[str, str] | None = None
         self.execute_history: list[str] = []
         # Live-viewer delta tracking: name -> id(shape) at the last delta pull,
         # used to identity-diff changed shapes (see worker._op_pull_viewer_deltas).
@@ -217,6 +224,44 @@ class Session:
                 print(f"Registered '{name}'")
 
         self.namespace["show"] = show
+
+        def recognition_faces(reference: str, role: str = "constituent"):
+            """Resolve a recognise_features() handle to exact caller-part faces.
+
+            References are intentionally valid only while their source session
+            object is unchanged. This mirrors quiddity's evidence
+            lifecycle instead of turning transient topology into persistent IDs.
+            """
+            target = self._recognition_targets.get(reference)
+            if target is None:
+                raise ValueError(
+                    f"Unknown or expired recognition reference {reference!r}; "
+                    "call recognise_features() again."
+                )
+            source_name = target["source_name"]
+            source = target["source"]
+            active = (
+                self.current_shape if source_name == "@current" else self.objects.get(source_name)
+            )
+            if active is not source:
+                raise ValueError(
+                    f"Stale recognition reference {reference!r}; source geometry changed. "
+                    "Call recognise_features() again."
+                )
+            evidence = target["evidence"]
+            feature = target["feature"]
+            if role == "constituent":
+                refs = evidence.constituent_faces(feature)
+            elif role == "defining":
+                refs = evidence.defining_faces(feature)
+            else:
+                raise ValueError("recognition face role must be 'constituent' or 'defining'")
+            resolver = getattr(evidence, "caller_face", evidence.face)
+            from build123d import ShapeList
+
+            return ShapeList([resolver(face_ref) for face_ref in refs])
+
+        self.namespace["recognition_faces"] = recognition_faces
 
         def set_page(width: float, height: float, margin: float = 5.0) -> None:
             """Register the drawing page extent for lint_drawing bounds checking.
@@ -539,8 +584,8 @@ class Session:
 
             Returns dict records: bore location/axis/diameter/depth, cap face
             indices at the opening, split-cap risk flags, and construction
-            advice. Use before extending a square/rounded-square boss with a
-            central bore.
+            advice. Use before lengthening any boss that carries a bore,
+            whatever its outer profile.
             """
             from build123d_mcp.tools.find_features import _find_bored_boss_candidates
 
@@ -806,11 +851,18 @@ class Session:
             # Preserve namespace, objects, and current_shape — partial execution results
             # (variables defined before the error, show() calls that succeeded) are kept
             # so iterative workflows can continue without losing context.
+            # Because partial state is retained, it can no longer be attributed
+            # exactly to the prior source-backed hash.
+            self.source_provenance = None
             self.last_error_detail = self._make_error_detail(exc, code)
             return f"Error: {type(exc).__name__}: {exc}"
 
         self.last_error_detail = None
         self.execute_history.append(code)
+        # A later successful incremental step means the active session no longer
+        # corresponds exactly to the last source-backed hash. execute_file_code()
+        # installs fresh provenance after this call when it promotes a new root.
+        self.source_provenance = None
         new_keys = {k for k in self.namespace if k not in _INJECTED} - values_before.keys()
         self._update_current_shape(new_keys)
 
@@ -931,6 +983,7 @@ class Session:
             "current_shape": self._copy_shape(self.current_shape),
             "objects": {k: self._copy_shape(v) for k, v in self.objects.items()},
             "object_groups": dict(self.object_groups),
+            "source_provenance": copy.deepcopy(self.source_provenance),
         }
 
     def restore_snapshot(self, name: str) -> None:
@@ -942,6 +995,7 @@ class Session:
         self.objects.update(snap["objects"])
         self.object_groups.clear()
         self.object_groups.update(snap.get("object_groups", {}))
+        self.source_provenance = copy.deepcopy(snap.get("source_provenance"))
 
     def _summarise_var_changes(self, before: dict) -> str:
         """Return a compact summary of scalar variables added or changed since *before*.
@@ -984,6 +1038,10 @@ class Session:
         self.drawing_page = None
         self.last_error_detail = None
         self.geometry_refs.clear()
+        self._recognition_runs.clear()
+        self._recognition_targets.clear()
+        self._recognition_next_run = 1
+        self.source_provenance = None
         self.execute_history = []
         self._viewer_baseline.clear()
         self._inject_builtins()

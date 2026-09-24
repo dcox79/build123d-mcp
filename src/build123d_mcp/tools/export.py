@@ -1,6 +1,7 @@
 import contextlib
 import copy
 import errno
+import json
 import os
 import stat
 import struct
@@ -406,7 +407,7 @@ def _write_step(shape, abs_path: str) -> None:
     ``export_step`` goes through ``STEPCAFControl_Writer`` (the CAF writer that
     carries names/colours). On build123d 0.11 that path raises
     ``RuntimeError: Failed to write STEP file`` on a solid that came straight from
-    ``import_step`` (gumyr/build123d#1356) — hit ~38% of editing-fixture runs,
+    ``import_step`` (gumyr/build123d#1356) — hit ~38% of edits of imported parts,
     where the agent imports a STEP and re-exports the edited solid.
 
     The obvious retry — wrap the solid in a ``Compound`` — gets it through the CAF
@@ -557,31 +558,32 @@ def export_file(session, filename: str, format: str = "step", object_name: str =
     # sanity check that the right, non-degenerate object landed in the file (#241).
     sanity = _sanity_line(shape)
     suffix = f"\n{sanity}" if sanity else ""
-    # For 3D solids, run the validity gate: a CAD scorer rejects a non-watertight
-    # / non-manifold / non-solid STEP or STL outright (score zero), so flag it at
+    # For 3D solids, run the validity gate: strict CAD/mesh consumers reject a non-watertight
+    # / non-manifold / non-solid STEP or STL outright, so flag it at
     # the last possible moment rather than letting an invalid artifact ship.
     if not is_2d:
         from build123d_mcp.tools.validate import _gate_report
 
         # Gate the WRITTEN-AND-REIMPORTED STEP, not the in-memory shape. A CAD
-        # scorer re-imports the file, and serialization can degrade a shape that
+        # consumer re-imports the file, and serialization can degrade a shape that
         # passed in memory (drop a solid, break BRep validity) — so validating the
         # in-memory object gives a false PASS while shipping an invalid file. Re-
         # import what we just wrote and gate that; it is the authoritative artifact
         # (export runs once, so the extra import + exact mesh check is fine).
         step_path = next((p for p in exported if p.lower().endswith((".step", ".stp"))), None)
         gate_shape = shape
+        report: dict | None = None
         if step_path is not None:
             try:
                 from build123d import import_step
 
                 gate_shape = import_step(step_path)
             except Exception:
-                gate_shape = None  # not even loadable — a scorer would reject it
+                gate_shape = None  # not even loadable — any consumer would reject it
         if gate_shape is None:
             suffix += (
                 "\n⚠ VALIDITY GATE FAIL — the written STEP could not be re-imported; "
-                "a CAD scorer would reject this file (score zero). Fix the solid and re-export "
+                "strict CAD/mesh consumers would reject this file. Fix the solid and re-export "
                 "(the build123d://skill/repair resource has the defect-class repair ladder)."
             )
         elif step_path is not None:
@@ -611,7 +613,7 @@ def export_file(session, filename: str, format: str = "step", object_name: str =
             )
             if not report["passes_gate"]:
                 suffix += (
-                    "\n⚠ VALIDITY GATE FAIL — a CAD scorer would reject this file (score zero): "
+                    "\n⚠ VALIDITY GATE FAIL — strict CAD/mesh consumers would reject this file: "
                     + "; ".join(report["reasons"])
                     + ". Fix the solid and re-export (run validate() for detail; the "
                     "build123d://skill/repair resource has the defect-class repair ladder)."
@@ -627,11 +629,32 @@ def export_file(session, filename: str, format: str = "step", object_name: str =
             report = _gate_report(gate_shape, exact=True)
             if not report["passes_gate"]:
                 suffix += (
-                    "\n⚠ VALIDITY GATE FAIL — a CAD scorer would reject this file (score zero): "
+                    "\n⚠ VALIDITY GATE FAIL — strict CAD/mesh consumers would reject this file: "
                     + "; ".join(report["reasons"])
                     + ". Fix the solid and re-export (run validate() for detail; the "
                     "build123d://skill/repair resource has the defect-class repair ladder)."
                 )
+
+        # Overlapping bodies do NOT fail the gate (a deliberate interference fit is
+        # legitimate), so the advisory lives in report["warnings"] — which nothing
+        # here reads. Surface it explicitly: this is the path #453 was actually
+        # about, where the written STEP carries more material than the part has and
+        # the sanity line above restates the summed volume as if it were the truth.
+        if report is not None and report.get("overlapping_pairs"):
+            suffix += (
+                f"\n⚠ OVERLAPPING BODIES — {report['overlapping_pairs']} pair(s) of solids "
+                f"share material (pairwise intersection total "
+                f"{report['pairwise_overlap_volume']}). The volume reported above SUMS the "
+                "bodies, so it counts the shared material more than once and this file "
+                "carries more material than the part has. Fuse them and re-export unless "
+                "the interference is deliberate; validate() names the pairs."
+            )
+        elif report is not None and report.get("overlap_check") == "undetermined":
+            suffix += (
+                "\n⚠ NOTE — whether the solid bodies overlap was not determined (too many "
+                "bodies, or the intersection sweep ran out of budget), so the volume "
+                "reported above cannot be assumed free of double-counted material."
+            )
 
         # A single solid must land as a single STEP product. The #1356 ``Compound``
         # workaround (or any stray wrapper) writes it as ``PRODUCT('COMPOUND')`` ->
@@ -651,6 +674,80 @@ def export_file(session, filename: str, format: str = "step", object_name: str =
     if len(exported) == 1:
         return f"Exported to {exported[0]}{suffix}"
     return "Exported to:\n" + "\n".join(exported) + suffix
+
+
+def bank_candidate(
+    session,
+    filename: str,
+    object_name: str = "",
+    snapshot_name: str = "",
+) -> str:
+    """Gate a STEP candidate before atomically promoting it to ``filename``.
+
+    ``export_file`` deliberately writes even a failing diagnostic artifact.  That
+    is useful while repairing, but unsafe for a scored floor: an agent can batch
+    export and snapshot calls, then overwrite its last known-good file before it
+    has read the gate result.  This operation writes to a private sibling path,
+    runs the normal written-and-reimported export gate, and replaces the requested
+    file only when that gate is fully verified.  A failed or unchecked candidate
+    is deleted and any existing destination is left byte-for-byte untouched.
+    """
+    requested = filename if filename.lower().endswith((".step", ".stp")) else filename + ".step"
+    final_path = safe_output_path(requested)
+    parent = os.path.dirname(final_path) or os.getcwd()
+    os.makedirs(parent, exist_ok=True)
+    suffix = ".stp" if final_path.lower().endswith(".stp") else ".step"
+    fd, candidate_path = tempfile.mkstemp(prefix="bank-candidate-", suffix=suffix, dir=parent)
+    os.close(fd)
+    os.unlink(candidate_path)
+    existed = os.path.exists(final_path)
+
+    try:
+        report = export_file(session, candidate_path, "step", object_name)
+        failed = "VALIDITY GATE FAIL" in report
+        unchecked = "too large to mesh-check" in report or "mesh-level defect" in report
+        if failed or unchecked:
+            payload = {
+                "banked": False,
+                "filename": final_path,
+                "existing_output_preserved": existed,
+                "snapshot_saved": False,
+                "reason": "written STEP failed the validity gate"
+                if failed
+                else "mesh gate was not verified",
+                "next_tool_calls": [
+                    f"locate_gate_defects(object_name={object_name!r})",
+                    "repair_advice(error_text=<the export failure>, goal=<requested edit>, context=<locator diagnosis>)",
+                ],
+                "export_report": report,
+            }
+            return json.dumps(payload, indent=2)
+
+        os.replace(candidate_path, final_path)
+        saved = False
+        if snapshot_name:
+            session.save_snapshot(snapshot_name)
+            saved = True
+        target = object_name or "<current shape>"
+        payload = {
+            "banked": True,
+            "filename": final_path,
+            "replaced_existing_output": existed,
+            "snapshot_saved": saved,
+            "snapshot_name": snapshot_name or None,
+            "next_tool_call": f"recognise_features(object_name={target!r})",
+            "note": (
+                "The written STEP passed the gate and is now the safe floor. For an imported "
+                "B-rep edit, run compact then targeted recognition before manual topology walking."
+            ),
+            "export_report": report,
+        }
+        return json.dumps(payload, indent=2)
+    finally:
+        try:
+            os.unlink(candidate_path)
+        except OSError:
+            pass
 
 
 def _sanity_line(shape) -> str:

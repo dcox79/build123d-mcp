@@ -1,4 +1,5 @@
 import contextvars
+import functools
 import json
 import sys
 
@@ -24,13 +25,19 @@ snapshots — a feedback loop a one-shot script cannot give.
 
 Quick start: execute("from build123d import *"), build in small steps,
 register parts with show(part, "name"), measure() after every boolean,
-export() when done. Read the build123d://quickref resource before writing
-build code. Step-by-step workflows: build123d://skill/modeling (build 3D
+bank_candidate() when establishing a safe STEP floor or final output, and
+export() for ordinary diagnostic/interchange writes. For edits to imported
+B-reps, call recognise_features() once for a compact inventory after the
+baseline is gate-clean, before hand-walking topology; then expand only the
+likely feature families and use their exact face evidence where available.
+Read the build123d://quickref resource before writing build code. Step-by-step
+workflows: build123d://skill/modeling (build 3D
 parts, incl. from technical drawings), build123d://skill/edit (modify an
-existing model), build123d://skill/drawing (multi-view engineering drawings),
-and build123d://skill/repair (repair a solid that fails the validity gate);
-install any into the project with
-install_skill().
+existing model), and build123d://skill/repair (repair a solid that fails the
+validity gate); install any into the project with install_skill(). Engineering
+drawings have moved to draftwright (https://github.com/pzfreo/draftwright),
+which publishes its own skill; it is importable inside execute(), so a drawing
+is built from live session geometry without leaving the session.
 """
 
 # --- MCP tool annotations (#368) --------------------------------------------- #
@@ -362,6 +369,23 @@ def execute(code: str) -> str:
     return result
 
 
+@mcp.tool(annotations=_MUTATING)
+def execute_file(path: str, result_name: str = "", snapshot: str = "") -> str:
+    """Execute a canonical build123d .py file in a clean namespace and atomically promote its result. The prior active model is restored if the source has a syntax/runtime error, times out, produces no shape, or does not produce result_name. Assign a Shape to `result` or call show(); optionally set result_name to require/register a specific Shape or BuildPart variable. snapshot saves the promoted geometry checkpoint. Returns source SHA-256 provenance plus captured output. The source must be UTF-8, under an allowed read root, and no larger than BUILD123D_MAX_SCRIPT_BYTES (default 2 MiB). Use this for substantial generation revisions: edit model.py, execute_file(), then validate/measure/render/export through MCP."""
+    from build123d_mcp.tools.execute_file import read_source
+
+    source_path, code, source_sha256 = read_source(path)
+    result = _resolve_session().execute_file(
+        code=code,
+        source_path=source_path,
+        source_sha256=source_sha256,
+        result_name=result_name,
+        snapshot=snapshot,
+    )
+    _publish_deltas()
+    return result
+
+
 @mcp.tool(annotations=_READ_ONLY)
 def render_view(
     direction: str = "iso",
@@ -378,7 +402,7 @@ def render_view(
     colors: dict[str, str] | None = None,
     mode: str = "auto",
 ) -> list:
-    """Render model. Auto-detects 3D vs 2D: solids use the VTK tessellation path; 2D shapes (Sketches, edge Compounds, dimensioned drawings) use the ezdxf+matplotlib raster path — review dimensioned drawings the same way as 3D parts. Renders confirm appearance, not geometry — verify booleans with measure() first. format: 'png' (raster, default), 'svg' (HLR line drawing, works without a display), 'dxf' (HLR projection as parseable polylines for downstream 2D CAD), or 'both' (PNG + SVG together). If the PNG path fails (headless host), falls back to SVG automatically. direction: top, front, side, iso. azimuth/elevation: camera rotation in degrees applied after the direction preset. objects: comma-separated names or name:color pairs e.g. 'u_frame:blue,roller:red' (default: all, auto-coloured). quality: standard, high. clip_plane: x, y, z to slice; clip_at: absolute world coordinate along that axis (default: each mesh's midpoint). save_to: optional file path; for format='both' writes <save_to>.png and <save_to>.svg. mode: 'auto' (default; no solids + flat in Z = 2D), or '2d'/'3d' to force a pipeline when auto-detection picks wrong (e.g. a Compound mixing a Sketch and a solid routes to 3D); the path used is reported as 'Rendered via <mode> pipeline.' colors: optional dict mapping object names and special layer keys (`_dims`, `_labels`) to colour names or '#aabbcc'; overrides name:color syntax and the default dimension colour (2D PNG/SVG only; ignored for 3D and DXF). label_objects: when true, each named object is labelled at its centroid in the PNG. highlights: optional list of entities to label, e.g. [{"object": "bracket", "type": "edge", "index": 5, "label": "hinge_edge"}]; type is 'face', 'edge', or 'vertex', index matches shape.faces()/edges()/vertices(); the object must be registered with show() and in the rendered set. Labels are PNG-only."""
+    """Render model. Auto-detects 3D vs 2D: solids use VTK; flat drawings use the 2D pipeline. Renders confirm appearance, not geometry. format: png, svg, dxf, or both. direction accepts top, bottom, front, rear, side, left, right, or iso. quality: preview, standard, or high; a timed-out standard/high PNG automatically retries once as a coarse preview. azimuth/elevation apply after the preset. objects selects comma-separated registered names. clip_plane: x/y/z. save_to writes the result. mode: auto/2d/3d. label_objects and highlights add PNG labels; colors controls object/layer colours."""
     result = _resolve_session().render_view(
         direction=direction,
         objects=objects,
@@ -406,13 +430,13 @@ def measure(object_name: str = "", density: float = 0.0, material: str = "") -> 
 
 @mcp.tool(annotations=_READ_ONLY)
 def validate(object_name: str = "") -> str:
-    """Check whether a shape would pass a CAD validity gate before exporting it. Returns a PASS/FAIL verdict plus JSON (passes_gate, n_solids, volume, is_manifold, brep_valid, reasons). The gate mirrors what CAD scorers and downstream tools require: a well-formed (BRepCheck), watertight, manifold solid with non-zero volume. A FAIL means a STEP/STL export would be rejected outright (e.g. CADGenBench scores it zero) — common causes are a leftover 2D sketch or open shell as the current shape, an un-fused compound, or a degenerate boolean result. Run this immediately before export() on any part you intend to submit or hand off. object_name: named object from show() (default: current shape)."""
+    """Check whether a shape would pass a CAD validity gate before exporting it. Returns a PASS/FAIL verdict plus JSON (passes_gate, n_solids, volume, is_manifold, brep_valid, reasons). The gate mirrors what strict CAD and mesh consumers require: a well-formed (BRepCheck), watertight, manifold solid with non-zero volume. A FAIL means a STEP/STL export would be rejected outright — common causes are a leftover 2D sketch or open shell as the current shape, an un-fused compound, or a degenerate boolean result. Run this immediately before export() on any part you intend to submit or hand off. object_name: named object from show() (default: current shape)."""
     return _resolve_session().validate(object_name)
 
 
 @mcp.tool(annotations=_READ_ONLY)
 def locate_gate_defects(object_name: str = "") -> str:
-    """Report WHERE a solid fails the validity gate, with 3D coordinates — so you can fix the exact edge/face instead of guessing. validate()/export() tell you WHAT is wrong (e.g. "1 non-manifold edge", "BRepCheck failed") but not where; call this when validate() FAILs to get a per-defect list: brep_invalid_face (face index + center + BRepCheck status, e.g. an unorientable BSpline), open_edge / nonmanifold_edge (B-rep edge midpoint + faces_incident), the mesh self-touches a CAD scorer rejects — mesh_nonmanifold_edge (edge midpoint) and mesh_nonmanifold_vertex (corner-to-corner touch point), mesh_untriangulated_face (a face that cannot tessellate at the base tolerance), mesh_refined_untriangulated_face (a face that only fails at a finer tolerance) — and mesh_vertex_deflection_defect (a tessellated edge endpoint that misses its own BREP vertex by more than the mesh deflection — a patched/healed face whose boundary is topologically closed but geometrically off-vertex; BRepCheck and even the open-edge count can both read clean, but a CAD scorer's own mesh sanity check still rejects it). Each defect includes a generic repair hint plus diagnostic_class / repair_family / next_step metadata; the top-level diagnosis block counts defect kinds and recommends the next verification path. An empty list means the part passes the structural checks. Bounded out-of-process (it mesh-checks), so a huge part returns a clean budget error rather than hanging. object_name: named object from show() (default: current shape)."""
+    """Report WHERE a solid fails the validity gate, with 3D coordinates — so you can fix the exact edge/face instead of guessing. validate()/export() tell you WHAT is wrong (e.g. "1 non-manifold edge", "BRepCheck failed") but not where; call this when validate() FAILs to get a per-defect list: brep_invalid_face (face index + center + BRepCheck status, e.g. an unorientable BSpline), open_edge / nonmanifold_edge (B-rep edge midpoint + faces_incident), the mesh self-touches strict CAD/mesh consumers reject — mesh_nonmanifold_edge (edge midpoint) and mesh_nonmanifold_vertex (corner-to-corner touch point), mesh_untriangulated_face (a face that cannot tessellate at the base tolerance), mesh_refined_untriangulated_face (a face that only fails at a finer tolerance) — and mesh_vertex_deflection_defect (a tessellated edge endpoint that misses its own BREP vertex by more than the mesh deflection — a patched/healed face whose boundary is topologically closed but geometrically off-vertex; BRepCheck and even the open-edge count can both read clean, but a strict mesh sanity check still rejects it). Each defect includes a generic repair hint plus diagnostic_class / repair_family / next_step metadata; the top-level diagnosis block counts defect kinds and recommends the next verification path. An empty list means the part passes the structural checks. Bounded out-of-process (it mesh-checks), so a huge part returns a clean budget error rather than hanging. object_name: named object from show() (default: current shape)."""
     return _resolve_session().locate_gate_defects(object_name)
 
 
@@ -438,6 +462,66 @@ def verify_spec(spec: str = "", spec_path: str = "", object_name: str = "") -> s
 def suggest_spec(object_name: str = "") -> str:
     """Draft a starter design-intent spec from the current (or named) shape, so you can edit detected values instead of authoring a verify_spec spec from scratch. Introspects the shape with the same primitives verify_spec checks against — bounding box (→ envelope_mm), the validity gate (→ solid), volume, feature recognition (→ hole/hole_pattern/boss features), and top-level numeric parameters — and returns JSON {spec, note}. The `spec` describes what was BUILT (envelope/volume use a ±2% band, parameters ±10% — editable defaults); review and edit each value against your intended drawing, then pass the `spec` object to verify_spec(). NOT captured: absolute positions, and cosmetic/other features (fillets, chamfers, pockets, ribs) the recognizers don't cover — add those manually. object_name: named object from show() (default: current shape)."""
     return _resolve_session().suggest_spec(object_name)
+
+
+# --- drawing deprecation (#465) ---------------------------------------------
+#
+# The drawing tools are moving to draftwright, which owns drawing generation and
+# publishes its own skill. They still work; this phase only announces the move.
+_DRAWING_MOVED = (
+    "NOTE — this drawing tool is DEPRECATED and moves to draftwright "
+    "(https://github.com/pzfreo/draftwright): off by default from 0.4.0, removed in 0.5.0 "
+    "(#465). draftwright is already importable inside execute(), so a drawing can be built "
+    "from live session geometry without leaving the session:\n"
+    '  execute("from draftwright import make_drawing; d = make_drawing(part)")\n'
+)
+
+
+def _notice_onto_text(text: str) -> str:
+    """Attach the notice without destroying a machine-readable result.
+
+    Three of the six drawing tools return pure JSON — inspect_drawing,
+    lint_drawing and suggest_view_layout. Prefixing prose to those breaks
+    json.loads() for every caller that parses them, and a deprecation must not
+    cost correctness in the releases where the tool still works. A JSON object
+    carries the notice as a leading field instead (a model reads it either way);
+    anything else takes the prose prefix.
+    """
+    if text.lstrip().startswith("{"):
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            return _DRAWING_MOVED + text
+        if isinstance(payload, dict):
+            return json.dumps({"_deprecated": _DRAWING_MOVED.strip(), **payload}, indent=2)
+    return _DRAWING_MOVED + text
+
+
+def _drawing_deprecation(fn):
+    """Prefix a drawing tool's RESULT with the move notice.
+
+    The description reaches a client once, at connect. An agent already mid-session
+    holds the tool in its context and never re-reads it — and because these tools
+    keep working, nothing else would tell it either. The result is the only channel
+    that reaches that caller, which is why the notice goes here as well as in the
+    description rather than instead of it.
+
+    Applied UNDER @mcp.tool so the registered callable is the wrapper; functools.wraps
+    carries the docstring and signature through, so the advertised description and
+    input schema are unchanged.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        result = fn(*args, **kwargs)
+        if isinstance(result, list):
+            # render_drawing returns marshalled content blocks; lead with the notice.
+            return [TextContent(type="text", text=_DRAWING_MOVED), *result]
+        if isinstance(result, str):
+            return _notice_onto_text(result)
+        return result
+
+    return wrapper
 
 
 def register_experimental_tools() -> None:
@@ -469,12 +553,15 @@ _LIBRARY_TOOLS = ("search_library", "load_part")
 
 
 def apply_tool_visibility(
-    disabled_groups: tuple[str, ...] = (), *, has_library: bool = True
+    disabled_groups: tuple[str, ...] = (),
+    *,
+    has_library: bool = True,
+    enabled_tools: tuple[str, ...] = (),
 ) -> None:
     """Trim optional tools from the served surface to reduce per-request schema cost.
 
     All tools register at import; this removes (a) each group named in
-    ``disabled_groups`` — an opt-out for fleets/benchmark harnesses that never touch it —
+    ``disabled_groups`` — an opt-out for fleets/automated pipelines that never touch it —
     and (b) the part-library tools when ``has_library`` is false. Called by
     ``cli.main()`` after ``configure()``. Unknown group names are reported and ignored.
     """
@@ -490,6 +577,16 @@ def apply_tool_visibility(
         remove.update(_TOOL_GROUPS[group])
     if not has_library:
         remove.update(_LIBRARY_TOOLS)
+    existing = {tool.name for tool in mcp._tool_manager.list_tools()}
+    if enabled_tools:
+        requested = set(enabled_tools)
+        unknown = requested - existing
+        if unknown:
+            print(
+                f"WARNING: unknown --tools value(s): {', '.join(sorted(unknown))}",
+                file=sys.stderr,
+            )
+        remove.update(existing - requested)
     for name in remove:
         try:
             mcp.remove_tool(name)
@@ -595,9 +692,16 @@ def export(filename: str, format: str = "step", object_name: str = "") -> str:
     return _resolve_session().export_file(filename, format, object_name)
 
 
+@mcp.tool(annotations=_IDEMPOTENT)
+def bank_candidate(filename: str, object_name: str = "", snapshot_name: str = "") -> str:
+    """Atomically promote a gate-clean STEP as the safe output/checkpoint. Writes the candidate to a private sibling file, runs the authoritative written-and-reimported STEP gate, and replaces filename only on a fully verified PASS; on FAIL or an unchecked mesh gate, the candidate is deleted and any existing output is preserved. If snapshot_name is supplied, the geometry snapshot is saved only after promotion. Returns JSON including banked, preservation/snapshot status, the export report, and the next recommended recognition or repair call. Use this instead of batching export() and save_snapshot() for scored floors and final candidates."""
+    return _resolve_session().bank_candidate(filename, object_name, snapshot_name)
+
+
 @mcp.tool(annotations=_READ_ONLY)
+@_drawing_deprecation
 def inspect_drawing(objects: str = "", svg_path: str = "") -> str:
-    """Structured bbox and annotation report for a 2D drawing.
+    """DEPRECATED (#465) — moved to draftwright; off by default in 0.4.0, removed in 0.5.0. Calling it explains the replacement. Structured bbox and annotation report for a 2D drawing.
 
     Two modes:
 
@@ -631,12 +735,40 @@ def inspect_drawing(objects: str = "", svg_path: str = "") -> str:
 
 
 @mcp.tool(annotations=_READ_ONLY)
+def prepare_drawing(
+    image_path: str,
+    output_dir: str = "drawing_regions",
+    max_regions: int = 12,
+    padding: int = 24,
+) -> str:
+    """Prepare a raster engineering drawing for efficient inspection. Detects substantial spatial regions, saves one labelled overview plus readable PNG crops, and returns their pixel bounding boxes and paths. Region ids are layout evidence only: this tool does NOT label views, recognise CAD features, interpret lines, infer dimensions, or trace geometry. Use it once near the start instead of repeatedly writing shell/PIL crop scripts; inspect the returned overview and only the relevant crops. Printed dimensions remain authoritative. image_path: PNG/JPEG/TIFF drawing under an allowed read root. output_dir: crop directory under an allowed write root. max_regions: 1..30. padding: crop padding in pixels, 0..500."""
+    from build123d_mcp.tools.prepare_drawing import prepare_drawing as _prepare
+
+    return _prepare(image_path, output_dir, max_regions, padding)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+def crop_drawing(
+    image_path: str,
+    bbox_px: list[int],
+    output_path: str = "drawing_crop.png",
+    scale: float = 2.0,
+    autocontrast: bool = True,
+) -> str:
+    """Save one model-selected raster drawing region at readable scale. bbox_px is exact source-image [x0,y0,x1,y1]; scale is 0.25..12. Returns the saved PNG path and an exact crop-pixel→source-pixel transform, so coordinates read from the enlargement remain usable. This is a mechanical crop only: it performs no OCR, feature recognition, or geometry inference."""
+    from build123d_mcp.tools.drawing_evidence import crop_drawing as _crop
+
+    return _crop(image_path, bbox_px, output_path, scale, autocontrast)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+@_drawing_deprecation
 def view_axes(
     viewport_origin: list[float],
     viewport_up: list[float] | None = None,
     look_at: list[float] | None = None,
 ) -> str:
-    """Return the world→page axis mapping for a project_to_viewport call,
+    """DEPRECATED (#465) — moved to draftwright; off by default in 0.4.0, removed in 0.5.0. Calling it explains the replacement. Return the world→page axis mapping for a project_to_viewport call,
     computed analytically (no projection performed). Use this BEFORE rendering
     a projected view to confirm which world axis ends up on which page axis
     and with what sign — catches bottom-view/side-view axis swaps before they
@@ -659,12 +791,13 @@ def view_axes(
 
 
 @mcp.tool(annotations=_READ_ONLY)
+@_drawing_deprecation
 def lint_drawing(
     svg_path: str = "",
     drawing_scale: float = 1.0,
     view_shape_names: list[str] | None = None,
 ) -> str:
-    """Run structural drawing-quality checks and return JSON {violations: [...]}.
+    """DEPRECATED (#465) — moved to draftwright; off by default in 0.4.0, removed in 0.5.0. Calling it explains the replacement. Run structural drawing-quality checks and return JSON {violations: [...]}.
 
     Session mode (default): reconstructs the session's annotations and delegates
     to build123d-drafting-helpers (lint_drawing + find_interferences) — single
@@ -697,8 +830,9 @@ def lint_drawing(
 
 
 @mcp.tool(annotations=_READ_ONLY)
+@_drawing_deprecation
 def render_drawing(svg_path: str, width: int = 1200, save_to: str = "") -> list:
-    """Rasterise an existing SVG file to PNG via resvg-py.
+    """DEPRECATED (#465) — moved to draftwright; off by default in 0.4.0, removed in 0.5.0. Calling it explains the replacement. Rasterise an existing SVG file to PNG via resvg-py.
 
     Complements render_view (which takes build123d shapes from the live
     session) by accepting an SVG written outside the sandbox — typically by
@@ -717,8 +851,9 @@ def render_drawing(svg_path: str, width: int = 1200, save_to: str = "") -> list:
 
 
 @mcp.tool(annotations=_MUTATING)
+@_drawing_deprecation
 def save_drawing_annotations(svg_path: str) -> str:
-    """Write a .dims.json sidecar file alongside an SVG with label metadata.
+    """DEPRECATED (#465) — moved to draftwright; off by default in 0.4.0, removed in 0.5.0. Calling it explains the replacement. Write a .dims.json sidecar file alongside an SVG with label metadata.
 
     build123d renders Text as filled glyph paths, not <text> SVG elements, so
     label strings are irrecoverable from a finished SVG. Call this tool after
@@ -885,7 +1020,7 @@ def find_bosses(object_name: str = "") -> str:
 
 @mcp.tool(annotations=_READ_ONLY)
 def find_bored_bosses(object_name: str = "") -> str:
-    """Find candidate bored bosses and report target-selection/edit evidence: bore opening location, axis into the part, outward axis, bore diameter/depth, planar cap faces at the opening, whether the cap is split across multiple faces, and construction advice. Use this before extending a square/rounded-square boss with a central bore; it is read-only and diagnostic, not proof of the requested target."""
+    """Find candidate bored bosses and report target-selection/edit evidence: bore opening location, axis into the part, outward axis, bore diameter/depth, planar cap faces at the opening, whether the cap is split across multiple faces, and construction advice. Use this before lengthening any boss that carries a bore, whatever its outer profile; it is read-only and diagnostic, not proof of the requested target."""
     return _resolve_session().find_bored_bosses(object_name)
 
 
@@ -895,12 +1030,30 @@ def find_countersinks(object_name: str = "") -> str:
     return _resolve_session().find_countersinks(object_name)
 
 
+@mcp.tool(annotations=_READ_ONLY)
+def recognise_features(
+    object_name: str = "",
+    families: str = "",
+    coordinate_frame: str = "caller",
+    include_faces: bool = False,
+    max_features: int = 50,
+) -> str:
+    """Run the shared quiddity inventory once and return exact, run-local edit evidence. With families='' the response is a compact inventory and targetable-family count; pass comma-separated families such as 'holes,bosses,blends' for structured records and @feature handles. Returned handles are usable inside execute() as recognition_faces(handle), or recognition_faces(handle, role='defining'), and fail if their source geometry has been replaced. coordinate_frame='caller' (default) preserves the imported model coordinates used by edit instructions; 'part' uses a rigid-equivariant part-relative frame and returns that frame. include_faces adds exact caller-face indices and geometry descriptors. max_features limits expanded records to 1..100; counts remain exact."""
+    return _resolve_session().recognise_features(
+        object_name,
+        families=families,
+        coordinate_frame=coordinate_frame,
+        include_faces=include_faces,
+        max_features=max_features,
+    )
+
+
 # not read-only: with the optional label= arg it stores the descriptor in
 # session.geometry_refs (persistent, cleared by reset(), shown in session_state()).
 # Idempotent — the same label overwrites.
 @mcp.tool(annotations=_IDEMPOTENT)
 def resolve(object_name: str, selector: str, label: str = "") -> str:
-    """Evaluate a selector expression against a named object and return a geometry descriptor. selector is a Python expression suffix applied to the object, e.g. '.faces().filter_by(Axis.Z).last()'. If label is given, the descriptor is stored in session.geometry_refs[label] and appears in session_state(). Returns JSON: {label, ref, object, selector, type, area/length, center, normal (for Face)}. The ref field uses @cad[object#label] format."""
+    """Evaluate a selector expression against a named object and return a geometry descriptor. selector is a Python expression suffix applied to the object, e.g. '.faces().filter_by(Axis.Z).last()'. If label is given, the descriptor is stored in session.geometry_refs[label] and appears in session_state(). Returns JSON: {label, ref, object, selector, type, geom_type, area/length, center}. center is the entity's true centre — the arc centre for a circular/elliptical edge, the area centroid otherwise — not the parametric midpoint, which for a circle or cylinder lies ON the entity a radius from its axis. A planar face also carries normal; a curved face carries axis {origin, direction} and radius instead, because a curved face has no single normal (a sphere carries neither — its centre and radius say everything). A list-valued selector carries count, an aggregate center averaged over every match, and per-entity descriptors in entities (first 50, with entities_truncated when there are more). The ref field uses @cad[object#label] format."""
     return _resolve_session().resolve(object_name, selector, label=label)
 
 
@@ -1047,9 +1200,9 @@ BUILD123D-MCP WORKFLOW GUIDE
    ezdxf+matplotlib path), and ship it with export(name, "dxf").
 
    Two cookbooks for two audiences:
-   - build123d://drafting — engineering drawings for fabrication: tolerance
-     dims, TechnicalDrawing title block, multi-view sheets, hole tables.
-     Two-colour output (black part + blue dims).
+   - build123d://drafting — DEPRECATED (#465). Engineering drawings have moved to
+     draftwright (https://github.com/pzfreo/draftwright), which owns generation
+     and publishes its own skill.
    - build123d://presentation — design-discussion diagrams: per-group colour
      via ExportSVG layers, filled feature highlights, legends, reference
      axes, Draft scaling for small parts. Multi-colour SVG, run from a
@@ -1061,10 +1214,13 @@ BUILD123D-MCP WORKFLOW GUIDE
    default line_width=0.5 and arrow_length=3.0 make witness lines render as
    thick filled rectangles. Override every parameter, not just font_size.
 
-   For a guided multi-view drawing workflow (choose views, scale/page size,
-   annotate, lint, export SVG/DXF/PDF), call install_skill() to write a
-   step-by-step skill file into the current project, or read the skill directly
-   from the build123d://skill/drawing resource.
+   For a multi-view engineering drawing, use draftwright
+   (https://github.com/pzfreo/draftwright) — it owns drawing generation and
+   publishes its own skill. It is importable inside execute(), so the drawing is
+   built from live session geometry rather than an exported file:
+       execute("from draftwright import make_drawing; d = make_drawing(part)")
+   This server's drawing tools are deprecated: off by default from 0.4.0,
+   removed in 0.5.0 (#465).
 
 11. IMPORTING EXTERNAL FILES
    After import_cad_file(), the shape is a named object — use render_view(objects="name")
@@ -1116,7 +1272,7 @@ def build123d_selectors_cookbook() -> str:
 @mcp.resource(
     "build123d://drafting",
     mime_type="text/plain",
-    description="Code-first 2D engineering drawings cookbook: project a 3D part to a 2D view, dimension with ExtensionLine/DimensionLine, add tolerances, compose a TechnicalDrawing title block, multi-view sheet layout, hole-table pattern, export to DXF/SVG.",
+    description="DEPRECATED (#465) — moving to draftwright (https://github.com/pzfreo/draftwright), which owns drawing generation and publishes its own skill; importable inside execute(). Code-first 2D engineering drawings cookbook: project a 3D part to a 2D view, dimension with ExtensionLine/DimensionLine, add tolerances, compose a TechnicalDrawing title block, multi-view sheet layout, hole-table pattern, export to DXF/SVG.",
 )
 def build123d_drafting_cookbook() -> str:
     """build123d 2D drafting cookbook — code-first engineering drawings."""
@@ -1128,7 +1284,7 @@ def build123d_drafting_cookbook() -> str:
 @mcp.resource(
     "build123d://drafting-api",
     mime_type="text/plain",
-    description="Auto-generated API reference for build123d-drafting-helpers: exact signatures and one-line descriptions for every public class (Dimension, Leader, TitleBlock, Drawing, ...) and function, generated from the installed library so it always matches what execute() imports.",
+    description="DEPRECATED (#465) — moving to draftwright (https://github.com/pzfreo/draftwright), which owns drawing generation and publishes its own skill; importable inside execute(). Auto-generated API reference for build123d-drafting-helpers: exact signatures and one-line descriptions for every public class (Dimension, Leader, TitleBlock, Drawing, ...) and function, generated from the installed library so it always matches what execute() imports.",
 )
 def build123d_drafting_api() -> str:
     """build123d-drafting-helpers API reference — generated from the installed library."""
@@ -1138,7 +1294,7 @@ def build123d_drafting_api() -> str:
 @mcp.resource(
     "build123d://presentation",
     mime_type="text/plain",
-    description="Code-first design-discussion diagrams: per-group colour via ExportSVG layers, filled feature highlights, legends with swatches, reference axes, titles, and Draft scaling for small parts. Sister cookbook to build123d://drafting (which targets fabrication handoff).",
+    description="Code-first design-discussion diagrams: per-group colour via ExportSVG layers, filled feature highlights, legends with swatches, reference axes, titles, and Draft scaling for small parts. Presentation diagrams are NOT engineering drawings and are unaffected by the drawing deprecation (#465); this resource stays.",
 )
 def build123d_presentation_cookbook() -> str:
     """build123d presentation cookbook — discussion diagrams (vs drafting's fab drawings)."""
@@ -1170,6 +1326,7 @@ def build123d_bd_warehouse() -> str:
 
 
 @mcp.tool(annotations=_READ_ONLY)
+@_drawing_deprecation
 def suggest_view_layout(
     object_name: str = "",
     page_w: float = 297.0,
@@ -1182,7 +1339,7 @@ def suggest_view_layout(
     extents: list[float] | None = None,
     centroid: list[float] | None = None,
 ) -> str:
-    """Auto-calculate safe VIEW_X / VIEW_Y positions for a multi-view engineering drawing.
+    """DEPRECATED (#465) — moved to draftwright; off by default in 0.4.0, removed in 0.5.0. Calling it explains the replacement. Auto-calculate safe VIEW_X / VIEW_Y positions for a multi-view engineering drawing.
 
     Measures the named shape's bounding box and returns per-view page positions
     (VIEW_X, VIEW_Y), look_at values, and camera/up vectors for a standard
@@ -1232,7 +1389,7 @@ def suggest_view_layout(
 @mcp.resource(
     "build123d://skill/drawing",
     mime_type="text/plain",
-    description="The b123d-drawing engineering workflow skill: step-by-step guide for creating multi-view engineering drawings from build123d geometry (views, scale, annotation, lint, SVG/DXF/PDF export).",
+    description="DEPRECATED (#465) — moving to draftwright (https://github.com/pzfreo/draftwright), which owns drawing generation and publishes its own skill; importable inside execute(). The b123d-drawing engineering workflow skill: step-by-step guide for creating multi-view engineering drawings from build123d geometry (views, scale, annotation, lint, SVG/DXF/PDF export).",
 )
 def build123d_drawing_skill() -> str:
     """b123d-drawing engineering workflow skill."""
@@ -1278,14 +1435,15 @@ def build123d_repair_skill() -> str:
 
 
 @mcp.tool(annotations=_MUTATING)
-def install_skill(target: str = "claude", force: bool = False, skill: str = "drawing") -> str:
+def install_skill(target: str = "claude", force: bool = False, skill: str = "modeling") -> str:
     """Copy a b123d workflow skill into the current project.
 
     Writes the appropriate config file for the requested agent so the
     step-by-step workflow is available in future sessions.
 
-    skill: which workflow to install (default "drawing")
-      - drawing   → multi-view engineering drawings from build123d geometry
+    skill: which workflow to install (default "modeling")
+      - drawing   → DEPRECATED; still installs, but drawing generation has moved to
+                    draftwright, which publishes its own skill (#465)
       - modeling  → build 3D parts/assemblies (incl. from technical drawings)
       - edit      → modify existing build123d code and verify geometry deltas
       - repair    → repair a solid that fails the validity gate
@@ -1315,12 +1473,16 @@ def start_cad_session(description: str) -> list[PromptMessage]:
 Design task: {description}
 
 Workflow:
-1. Call reset(), then execute 'from build123d import *' to start clean.
-2. Build incrementally — small execute() calls are easier to debug than one large block.
+1. Call reset(), then read build123d://skill/modeling for the full workflow.
+2. Build incrementally with execute() by default. Use a canonical model.py with
+   execute_file() only when matching-view evidence shows that the valid checkpoint
+   needs a body-family/global-form rebuild; a failed rebuild atomically preserves it.
 3. After every execute(), call measure() to verify geometry (check volume and topology.faces).
 4. After every boolean (-, +, &), confirm topology.faces changed — unchanged counts mean the boolean failed.
 5. Use show(shape, "name") to register important intermediate shapes; it prints vol + face count immediately.
 6. Call render_view() only after measure() confirms the geometry is correct.
+   When working from a drawing, compare matching projections; printed dimensions
+   remain authoritative, while calibrated silhouettes may resolve undimensioned form.
 7. Call save_snapshot("name") before any experiment you might want to undo.
    For "what if?" proposals (add a hole, modify a feature) use the snapshot+restore loop:
    save_snapshot → mutate via execute → run analyses (measure/compare/render_view) → restore_snapshot.
@@ -1330,7 +1492,7 @@ Workflow:
    .move() — the relationship survives later changes. See build123d://quickref for examples.
 9. When complete: export("part", "step,stl").
 10. For 2D drawings, two cookbooks for two audiences:
-   - build123d://drafting   — engineering drawings for fabrication handoff.
+   - build123d://drafting   — DEPRECATED (#465); drawings moved to draftwright.
    - build123d://presentation — design-discussion diagrams (per-group colour,
      filled features, legends, axes, titles). Read this when the audience is
      a human reviewing a design rather than a fabricator.
