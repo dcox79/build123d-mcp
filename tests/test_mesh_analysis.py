@@ -221,3 +221,29 @@ def test_excessive_slice_count_is_rejected(session):
     session.execute(_BAR)
     with pytest.raises(ValueError, match="slices"):
         mesh_holes(session, "bar", slices=100_000)
+
+
+def test_opposed_pockets_stay_separate_with_one_slice(session):
+    session.execute(
+        "plate = Box(40, 40, 10)\n"
+        "plate -= Pos(0, 0, 3.5) * Cylinder(3, 3)\n"
+        "plate -= Pos(0, 0, -3.5) * Cylinder(3, 3)\n"
+        "show(plate, 'plate')"
+    )
+    pockets = [h for h in _holes(session, "plate", slices=1) if h["axis"] == "Z"]
+    assert len(pockets) == 2, pockets
+    assert all(not h["through"] for h in pockets)
+
+
+def test_through_hole_ignores_distant_flange_on_same_ray(session):
+    session.execute(
+        "part = Pos(0, 0, 1.5) * Box(30, 30, 3)\n"
+        "part += Pos(0, 0, 10.5) * Box(30, 30, 3)\n"
+        "part += Pos(14, 0, 6) * Box(2, 30, 12)\n"
+        "part -= Pos(0, 0, 1.5) * Cylinder(1.7, 5)\n"
+        "show(part, 'clip')"
+    )
+    holes = [h for h in _holes(session, "clip") if h["axis"] == "Z"]
+    assert len(holes) == 1, holes
+    assert holes[0]["through"], holes
+    assert 2.8 < holes[0]["depth"] < 3.1

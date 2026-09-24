@@ -18,8 +18,13 @@ internal duct is enclosed rather than an open groove.
 
 import json
 import math
+import time
 
-_MAX_TRIANGLES = 50_000
+import numpy as np
+
+from build123d_mcp.tools._budget import op_budget
+
+_MAX_TRIANGLES = 200_000
 _MAX_SLICES = 256
 _MAX_SLICE_WORK = _MAX_TRIANGLES * (48 + 24)
 
@@ -40,30 +45,52 @@ def _triangles(shape, tolerance: float):
     if len(tris) > _MAX_TRIANGLES:
         raise ValueError(
             f"mesh has {len(tris)} triangles (limit {_MAX_TRIANGLES}); "
-            "raise `tolerance` to tessellate more coarsely"
+            "decimate an imported STL before loading it, or raise tolerance for a CAD solid"
         )
-    pts = [(v.X, v.Y, v.Z) for v in verts]
-    return [(pts[a], pts[b], pts[c]) for a, b, c in tris]
+    points = np.asarray([(v.X, v.Y, v.Z) for v in verts], dtype=np.float64).reshape(-1, 3)
+    indices = np.asarray(tris, dtype=np.intp).reshape(-1, 3)
+    return points[indices]
+
+
+def _deadline(session) -> float:
+    # Return before the parent watchdog kills the worker and loses its session.
+    return time.monotonic() + max(1, op_budget(session) - 10)
+
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError(
+            "mesh analysis exceeded its time budget; lower slices or decimate the mesh"
+        )
 
 
 def _slice(tris, axis: int, value: float):
     """Segments where the plane axis=value cuts the mesh."""
-    segs = []
-    for tri in tris:
-        d = [p[axis] - value for p in tri]
-        hits = []
-        for i in range(3):
-            j = (i + 1) % 3
-            if (d[i] > 0.0) != (d[j] > 0.0):
-                f = d[i] / (d[i] - d[j])
-                hits.append(tuple(tri[i][k] + f * (tri[j][k] - tri[i][k]) for k in range(3)))
-        if len(hits) == 2:
-            segs.append((hits[0], hits[1]))
-    return segs
+    if len(tris) == 0:
+        return []
+    distance = tris[:, :, axis] - value
+    positive = distance > 0
+    crossing = positive != positive[:, [1, 2, 0]]
+    valid = crossing.sum(axis=1) == 2
+    if not np.any(valid):
+        return []
+    cut, distance, crossing = tris[valid], distance[valid], crossing[valid]
+    hits = []
+    for i, j in ((0, 1), (1, 2), (2, 0)):
+        denominator = distance[:, i] - distance[:, j]
+        fraction = np.divide(
+            distance[:, i], denominator, out=np.zeros_like(denominator), where=denominator != 0
+        )
+        hits.append(cut[:, i] + fraction[:, None] * (cut[:, j] - cut[:, i]))
+    edge_hits = np.stack(hits, axis=1)
+    order = np.argsort(~crossing, axis=1, kind="stable")[:, :2]
+    segments = edge_hits[np.arange(len(cut))[:, None], order]
+    return [(tuple(a), tuple(b)) for a, b in segments]
 
 
-def _chain(segs, weld: float):
+def _chain(segs, weld: float, deadline=None):
     """Join segments end-to-end into closed loops."""
+    _check_deadline(deadline)
     if not math.isfinite(weld) or weld <= 0:
         raise ValueError("weld must be a positive finite number")
 
@@ -88,7 +115,9 @@ def _chain(segs, weld: float):
 
     edges: list[tuple[int, int]] = []
     adj: dict[int, list[int]] = {}
-    for a, b in segs:
+    for number, (a, b) in enumerate(segs):
+        if number % 1024 == 0:
+            _check_deadline(deadline)
         start, end = vertex(a), vertex(b)
         if start == end:
             continue
@@ -100,12 +129,18 @@ def _chain(segs, weld: float):
     seen_edges: set[int] = set()
     loops = []
     for first_edge, (start, _) in enumerate(edges):
+        if first_edge % 1024 == 0:
+            _check_deadline(deadline)
         if first_edge in seen_edges:
             continue
         path = [start]
         path_vertices = {start}
         cur, edge = start, first_edge
+        steps = 0
         while True:
+            steps += 1
+            if steps % 1024 == 0:
+                _check_deadline(deadline)
             seen_edges.add(edge)
             a, b = edges[edge]
             nxt = b if cur == a else a
@@ -146,7 +181,7 @@ def _point_in_polygon(pt, poly) -> bool:
     return inside
 
 
-def _enclosed_flags(loops, axis: int):
+def _enclosed_flags(loops, axis: int, deadline=None):
     """Which loops are enclosed BY another loop.
 
     Loop count alone is not containment. A groove cut clean across a bar
@@ -157,6 +192,7 @@ def _enclosed_flags(loops, axis: int):
     polys = [_to_2d(lp, axis) for lp in loops]
     flags = []
     for i, poly in enumerate(polys):
+        _check_deadline(deadline)
         if not poly:
             flags.append(False)
             continue
@@ -200,7 +236,8 @@ def mesh_section(
         object_name: name from show()/import_cad_file (default: current shape)
         axis: "X", "Y" or "Z" - the plane's normal
         position: absolute world coordinate along that axis
-        tolerance: tessellation tolerance (larger = coarser = faster)
+        tolerance: tessellation tolerance for CAD solids; imported STL triangles
+            are fixed by the file and are not simplified by this setting
         weld: point-merge distance when chaining segments into loops
 
     Returns:
@@ -217,11 +254,13 @@ def mesh_section(
     """
     from build123d_mcp.tools.measure import _resolve_shape
 
+    deadline = _deadline(session)
     shape = _resolve_shape(session, object_name)
     ax = _axis_index(axis)
     tris = _triangles(shape, tolerance)
-    loops = _chain(_slice(tris, ax, position), weld)
-    flags = _enclosed_flags(loops, ax)
+    _check_deadline(deadline)
+    loops = _chain(_slice(tris, ax, position), weld, deadline)
+    flags = _enclosed_flags(loops, ax, deadline)
     records = []
     for lp, enclosed in zip(loops, flags):
         rec = _loop_record(lp, ax)
@@ -288,8 +327,10 @@ def mesh_holes(
     if min_depth < 0:
         raise ValueError("min_depth must be nonnegative")
 
+    deadline = _deadline(session)
     shape = _resolve_shape(session, object_name)
     tris = _triangles(shape, tolerance)
+    _check_deadline(deadline)
     if len(tris) * (slices + 24) > _MAX_SLICE_WORK:
         raise ValueError("slices too high for this mesh; lower slices or raise tolerance")
     bb = shape.bounding_box()
@@ -304,18 +345,19 @@ def mesh_holes(
         step = extent / slices
         found: dict = {}
         for value in _sample_positions(lo[ax], hi[ax], slices):
-            for key in _keys_at(tris, ax, value, weld, min_diameter, max_diameter):
+            for key in _keys_at(tris, ax, value, weld, min_diameter, max_diameter, deadline):
                 found.setdefault(key, []).append(value)
         u, v = [k for k in range(3) if k != ax]
         for key, positions in sorted(found.items()):
             cu, cv, dia = key
+            barriers = _axis_intersections(tris, ax, cu, cv, deadline)
             # One record per contiguous RUN, not per key. Two blind pockets
             # bored into opposite faces of a bar share a key - same centre in
             # the cross plane, same diameter - and merging them reports one
             # through hole where there are two pockets and solid material
             # between.
             spans = []
-            for run in _runs(positions, step):
+            for run in _runs(positions, step, barriers, weld):
                 # Sampling alone cannot give a span either: a shallow pocket
                 # can fall between two sample planes. Walk out from a real hit
                 # with a fine step to find where the feature actually stops.
@@ -330,18 +372,18 @@ def mesh_holes(
                     weld,
                     min_diameter,
                     max_diameter,
+                    deadline,
                 )
                 spans.append((start, end))
 
             # A missed slice can fragment a bore. Merge short gaps only when
             # the bore centreline has no surface crossing the gap: a pocket
             # floor is evidence of solid material, however thin the land is.
-            barriers = _axis_intersections(tris, ax, cu, cv)
             for start, end in _merge_spans(spans, step, barriers, weld):
                 if end - start < min_depth:
                     continue  # tessellation sliver, chamfer ring, not a hole
                 wall_start, wall_end = _local_wall_span(
-                    tris, ax, cu, cv, dia, start, end, (lo[ax], hi[ax])
+                    tris, ax, cu, cv, dia, start, end, (lo[ax], hi[ax]), deadline
                 )
                 edge_error = min(step * 0.6, (wall_end - wall_start) * 0.03)
                 centre = [0.0, 0.0, 0.0]
@@ -395,28 +437,42 @@ def _merge_spans(spans, step, barriers, weld):
     return out
 
 
-def _axis_intersections(tris, axis, u_value, v_value):
+def _axis_intersections(tris, axis, u_value, v_value, deadline=None):
     """Coordinates where an axis-parallel line meets mesh triangles."""
+    _check_deadline(deadline)
+    if len(tris) == 0:
+        return []
     u, v = [k for k in range(3) if k != axis]
-    hits = []
-    for tri in tris:
-        a, b, c = tri
-        bu, bv = b[u] - a[u], b[v] - a[v]
-        cu, cv = c[u] - a[u], c[v] - a[v]
-        du, dv = u_value - a[u], v_value - a[v]
-        det = bu * cv - bv * cu
-        if abs(det) < 1e-12:
-            continue
-        wb = (du * cv - dv * cu) / det
-        wc = (bu * dv - bv * du) / det
-        wa = 1 - wb - wc
-        if min(wa, wb, wc) >= -1e-9:
-            hits.append(wa * a[axis] + wb * b[axis] + wc * c[axis])
-    hits.sort()
-    return [p for i, p in enumerate(hits) if i == 0 or p - hits[i - 1] > 1e-6]
+    projected_u, projected_v = tris[:, :, u], tris[:, :, v]
+    nearby = (
+        (projected_u.min(axis=1) - 1e-9 <= u_value)
+        & (u_value <= projected_u.max(axis=1) + 1e-9)
+        & (projected_v.min(axis=1) - 1e-9 <= v_value)
+        & (v_value <= projected_v.max(axis=1) + 1e-9)
+    )
+    if not np.any(nearby):
+        return []
+    a, b, c = (tris[nearby, i] for i in range(3))
+    bu, bv = b[:, u] - a[:, u], b[:, v] - a[:, v]
+    cu, cv = c[:, u] - a[:, u], c[:, v] - a[:, v]
+    du, dv = u_value - a[:, u], v_value - a[:, v]
+    determinant = bu * cv - bv * cu
+    valid = np.abs(determinant) >= 1e-12
+    if not np.any(valid):
+        return []
+    a, b, c = a[valid], b[valid], c[valid]
+    determinant = determinant[valid]
+    wb = (du[valid] * cv[valid] - dv[valid] * cu[valid]) / determinant
+    wc = (bu[valid] * dv[valid] - bv[valid] * du[valid]) / determinant
+    wa = 1 - wb - wc
+    contained = np.minimum(np.minimum(wa, wb), wc) >= -1e-9
+    hits = np.sort((wa * a[:, axis] + wb * b[:, axis] + wc * c[:, axis])[contained])
+    if len(hits) == 0:
+        return []
+    return hits[np.r_[True, np.diff(hits) > 1e-6]].tolist()
 
 
-def _local_wall_span(tris, axis, cu, cv, diameter, start, end, fallback):
+def _local_wall_span(tris, axis, cu, cv, diameter, start, end, fallback, deadline=None):
     """Estimate local wall faces from rays just outside the bore perimeter."""
     radius = diameter * 0.65
     diagonal = radius / math.sqrt(2)
@@ -432,20 +488,21 @@ def _local_wall_span(tris, axis, cu, cv, diameter, start, end, fallback):
     ]
     spans = []
     for du, dv in offsets:
-        hits = _axis_intersections(tris, axis, cu + du, cv + dv)
+        hits = _axis_intersections(tris, axis, cu + du, cv + dv, deadline)
         if len(hits) < 2:
             continue
-        wall_start, wall_end = hits[0], hits[-1]
-        if wall_start <= start + 0.1 and wall_end >= end - 0.1:
-            spans.append((wall_start, wall_end))
+        for wall_start, wall_end in zip(hits[::2], hits[1::2]):
+            if wall_start <= start + 0.1 and wall_end >= end - 0.1:
+                spans.append((wall_start, wall_end))
     return min(spans, key=lambda span: span[1] - span[0], default=fallback)
 
 
-def _runs(positions, step):
+def _runs(positions, step, barriers=(), weld=0.001):
     """Split sorted sample positions into contiguous runs."""
     out, cur = [], [positions[0]]
     for p in positions[1:]:
-        if p - cur[-1] <= step * 1.5:
+        has_floor = any(cur[-1] + weld < hit < p - weld for hit in barriers)
+        if p - cur[-1] <= step * 1.5 and not has_floor:
             cur.append(p)
         else:
             out.append(cur)
@@ -454,11 +511,12 @@ def _runs(positions, step):
     return out
 
 
-def _keys_at(tris, ax: int, value: float, weld: float, min_d: float, max_d: float):
+def _keys_at(tris, ax: int, value: float, weld: float, min_d: float, max_d: float, deadline=None):
     """Feature keys present on one slice: (center_u, center_v, diameter)."""
+    _check_deadline(deadline)
     keys = []
-    loops = _chain(_slice(tris, ax, value), weld)
-    for loop, enclosed in zip(loops, _enclosed_flags(loops, ax)):
+    loops = _chain(_slice(tris, ax, value), weld, deadline)
+    for loop, enclosed in zip(loops, _enclosed_flags(loops, ax, deadline)):
         if not enclosed:
             continue  # an outline, or a disjoint piece of one - not a bore
         rec = _loop_record(loop, ax)
@@ -484,13 +542,15 @@ def _roughly_circular(loop, axis: int) -> bool:
     return perimeter > 0 and 4 * math.pi * area / perimeter**2 >= 0.85
 
 
-def _refine_span(tris, ax, key, run, step, lo, hi, weld, min_d, max_d):
+def _refine_span(tris, ax, key, run, step, lo, hi, weld, min_d, max_d, deadline=None):
     """True extent of one contiguous run, by fine stepping outwards."""
     fine = step / 16.0
     start = run[0]
-    while start - fine >= lo and key in _keys_at(tris, ax, start - fine, weld, min_d, max_d):
+    while start - fine >= lo and key in _keys_at(
+        tris, ax, start - fine, weld, min_d, max_d, deadline
+    ):
         start -= fine
     end = run[-1]
-    while end + fine <= hi and key in _keys_at(tris, ax, end + fine, weld, min_d, max_d):
+    while end + fine <= hi and key in _keys_at(tris, ax, end + fine, weld, min_d, max_d, deadline):
         end += fine
     return start, end
