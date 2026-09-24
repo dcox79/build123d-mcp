@@ -126,7 +126,7 @@ wheels = [
 
 [[package]]
 name = "build123d-mcp"
-version = "0.3.86.dev0"
+version = "0.3.87.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "augura" },
