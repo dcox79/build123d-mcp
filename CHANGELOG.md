@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.87
+
+### Added
+
+- **`bank_candidate()` preserves the last gate-clean STEP.** It writes a candidate
+  privately, validates the written and re-imported STEP, then promotes the file
+  and saves a matching session snapshot only on PASS. A failed gate leaves the
+  previous output in place.
+
+### Fixed
+
+- **Windows MCP stdio workers no longer inherit the server's protocol pipes.**
+  Worker startup gives the child `NUL` standard input and output handles while
+  retaining its dedicated IPC pipe and stderr logging. This addresses the
+  first-call `execute`, `render_view`, and `health_check` hangs reported in #452
+  without requiring `BUILD123D_IN_PROCESS=1`.
+
 ## v0.3.86
 
 ### Changed
